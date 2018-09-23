@@ -28,8 +28,12 @@ from tf_logger_class import Logger
 import glob
 import json
 from action_prod_field import ActionRuleField
-from production import Production
+# from production import Production
+from nltk.grammar import Production
+import production
+
 CACHE_DIR = './cache'
+
 
 def load_pretrained_model(type, pretrained_file):
     cache_file = os.path.join('./cache/', type + '_vocab.pkl')
@@ -52,6 +56,7 @@ def load_pretrained_model(type, pretrained_file):
             pickle.dump(pretrained_vocab, f)
         print("Done.", len(pretrained_vocab), " words loaded!")
         return pretrained_vocab
+
 
 class Trainer(object):
     def __init__(self,
@@ -147,7 +152,7 @@ class Trainer(object):
         # self.hper = 'id={}'.format(self.id)
         self.save_to = save_to
         self.debug_mode = debug_mode
-        self.train_productions = Production.get_train_productions(train_grammar_file)
+        self.train_productions = production.get_productions_from_file(train_grammar_file)  # type: List[Production]
 
     def set_random_seed(self) -> None:
         # self.logger.info('Setting random seed to %d', self.seed)
@@ -205,9 +210,9 @@ class Trainer(object):
             # ('labels', self.LABELS)
         ]
 
-    def process_each_corpus(self, corpus, name=None, shuffle=True, training=False):
-        assert corpus != None
-        dataset = self.make_dataset(corpus, name, training)
+    def process_each_corpus(self, corpus, name=None, shuffle=True):
+        assert corpus is not None
+        dataset = self.make_dataset(corpus, name)
         iterator = Iterator(dataset,
                             shuffle=shuffle,
                             device=torch.device('cuda') if self.cuda else -1,
@@ -217,8 +222,8 @@ class Trainer(object):
 
     def process_corpora(self) -> None:
         # TODO: fix this
-        self.train_dataset, self.train_iterator = self.process_each_corpus(self.train_corpus, 'train', shuffle=False,
-                                                                           training=True)
+        self.train_dataset, self.train_iterator = self.process_each_corpus(self.train_corpus, 'train', shuffle=True)
+                                                                           # training=True)
         self.logger.info('Len of train = ' + str(len(self.train_iterator)))
 
         if self.dev_corpus:
@@ -240,10 +245,11 @@ class Trainer(object):
                 else:
                     self.logger.warning(w + ' is already in the field')
             if using_vector:
-                self.logger.info('Add '+ str(cnt_add_w) + ' zero vectors into vocab.vectors')
-                field.vocab.vectors = torch.cat((field.vocab.vectors, torch.zeros(cnt_add_w, self.word_embedding_size)), 0)
+                self.logger.info('Add ' + str(cnt_add_w) + ' zero vectors into vocab.vectors')
+                field.vocab.vectors = torch.cat((field.vocab.vectors,
+                                                 torch.zeros(cnt_add_w, self.word_embedding_size)), 0)
 
-        self.logger.info('Building vocabularies' )
+        self.logger.info('Building vocabularies')
         self.logger.info('Loading pretrained vectors from' + self.pretrained_emb_path)
         pretrained_vec = vocab.Vectors(os.path.basename(self.pretrained_emb_path),
                                        os.path.dirname(self.pretrained_emb_path))
@@ -256,7 +262,7 @@ class Trainer(object):
             if each_vec.sum().item() == 0:
                 cnt_zero += 1
                 cur_word = self.WORDS.vocab.itos[cnt]
-                # assert cur_word.startswith('unk') or cur_word == '<unk>'
+                assert cur_word.startswith('unk') or cur_word == '<unk>' or cur_word in self.singletons
                 self.WORDS.vocab.vectors[cnt] = np.random.normal(0, 0.05)
                 zero_words.append(cur_word)
 
@@ -269,17 +275,15 @@ class Trainer(object):
         extend_vocab(self.NONTERMS, ['<w>'])
 
         self.ACTIONS.build_vocab()
+        assert self.ACTIONS.vocab.itos[2] == 'NP(TOP -> S)'
         self.RAWS.build_vocab(self.train_dataset)
 
         self.num_words = len(self.WORDS.vocab)
         self.num_pos = len(self.POS_TAGS.vocab)
         self.num_nt = len(self.NONTERMS.vocab)
         self.num_actions = len(self.ACTIONS.vocab)
-        self.logger.info(
-            'Found %d words, %d POS tags, %d nonterminals, %d actions',
-            self.num_words, self.num_pos, self.num_nt, self.num_actions)
-
-
+        self.logger.info('Found %d words, %d POS tags, %d nonterminals, %d actions',
+                         self.num_words, self.num_pos, self.num_nt, self.num_actions)
         # self.logger.info('Saving fields dict to%s', self.fields_dict_path)
         # torch.save(dict(self.fields), self.fields_dict_path, pickle_module=dill)
 
@@ -297,7 +301,7 @@ class Trainer(object):
             dropout=self.dropout,
             pretrained_emb_vec=self.WORDS.vocab.vectors,
             productions=self.train_productions,
-            NONTERMS=self.NONTERMS,
+            nonterms=self.NONTERMS,
         )
         self.model = DiscRNNG(*model_args, **model_kwargs)
         if self.cuda:
@@ -321,7 +325,7 @@ class Trainer(object):
             else:
                 return '<unk>'
 
-    def make_oracles(self, corpus: str, training=False):
+    def make_oracles(self, corpus: str):
         oracles = []
         f = open(corpus, 'r')
         line = f.readline()
@@ -336,12 +340,12 @@ class Trainer(object):
             unk_lst = [self.preprocess_token(x.lower()) for x in unks.split()]
             raw_token_lst = [self.preprocess_token(x.lower()) for x in token.split()]
 
-            #replace <unk> in raw with specific unk type in unk_lst
+            # replace <unk> in raw with specific unk type in unk_lst
             for id, raw_token in enumerate(raw_token_lst):
                 if raw_token == '<unk>':
                     raw_token_lst[id] = unk_lst[id]
 
-            #find all unk types
+            # find all unk types
             for id, w in enumerate(raw_token_lst):
                 if unk_lst[id].startswith('unk'):
                     if not w.startswith('unk'):
@@ -365,14 +369,14 @@ class Trainer(object):
             while line == '\n': line = f.readline()
         return oracles
 
-    def make_dataset(self, corpus, name, training):
+    def make_dataset(self, corpus, name):
         cached_corpus = os.path.join(CACHE_DIR, 'cached_' + name + '.pkl')
         if self.use_cache:
             self.logger.info('Loading cached corpus from ' + cached_corpus)
             oracles = torch.load(cached_corpus)
         else:
             self.logger.info('Reading from %s', corpus)
-            oracles = self.make_oracles(corpus, training)
+            oracles = self.make_oracles(corpus)
             self.logger.info('Dumping cached corpus to ' + cached_corpus)
             torch.save(oracles, cached_corpus)
 
@@ -437,10 +441,10 @@ class Trainer(object):
         interval_meter = utils.ParsingMeter()
         total_step = 0
         best_dev_f1 = 0
-        cnt = 0
+        # cnt = 0
         for epoch in range(self.max_epochs):
             start_time = timeit.default_timer()
-            for _, instance in enumerate(self.train_iterator):
+            for cnt, instance in enumerate(self.train_iterator):
                 self.model.zero_grad()
                 # if instance.labels.item() == False: continue
 
@@ -463,7 +467,7 @@ class Trainer(object):
                                 if random.random() > 0.5:
                                     unk_words[id] = self.WORDS.vocab.stoi[singleton_word]
                                     cnt_change += 1
-                                    self.logger.info('Change from ' + cur_unk_word + ' into ' + singleton_word)
+                                    # self.logger.info('Change from ' + cur_unk_word + ' into ' + singleton_word)
 
                 self.log_logits, self.pred_action_ids = self.model.forward(unk_words, pos_tags, actions)
 
@@ -499,7 +503,7 @@ class Trainer(object):
                         self.tf_logger.scalar_summary(tag=tag, value=value, step=total_step + 1)
                     total_step += 1
                     interval_meter.reset()
-                cnt += 1
+                # cnt += 1
 
             # DEV
             self.logger.info('Change ' + str(cnt_change) + ' into singleton tokens')
@@ -569,6 +573,7 @@ class Trainer(object):
 
         self.training_loss = self.losser(self.log_logits, instance.actions.view(-1))
         assert self.training_loss.item() != 0
+        assert not torch.isinf(self.training_loss)
         self.logger.warning('Loss = ' + str(self.training_loss.item()))
 
         self.training_loss.backward()
@@ -618,6 +623,7 @@ class Trainer(object):
         self.training()
         self.inference(self.test_iterator, type_corpus='test', tf_board=True)
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Train RNNG network')
     parser.add_argument('-t', '--train-corpus', required=True, metavar='FILE', help='path to train corpus')
@@ -644,6 +650,7 @@ def parse_args():
 
     args = parser.parse_args()
     return args
+
 
 if __name__ == '__main__':
     args = parse_args()

@@ -5,18 +5,22 @@ from nltk.tree import Tree
 import nltk
 from nltk.grammar import Nonterminal
 train_grammar_file = './data/train_grammar.txt'
+from nltk.grammar import Production
 
-class Production(nltk.grammar.Production):
-    def fromstring(self, str):
+class Production(Production):
+
+    @staticmethod
+    def fromstring( str):
         prod_split = str.partition('->')
         lhs = Nonterminal(prod_split[0].strip())
         rhs = [Nonterminal(e.strip()) for e in prod_split[2].split()]
-        return self.__init__(lhs, rhs)
+        return Production.__init__(lhs, rhs)
 
     @staticmethod
     def get_train_productions(train_grammar_file):
         productions = open(train_grammar_file, 'r').readlines()
         productions = [e.replace('\n', '') for e in productions]
+        productions = [Production.fromstring(e) for e in productions]
         return productions
         # print('len = ', len(productions))
         # nonterms = []
