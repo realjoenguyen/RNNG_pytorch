@@ -364,7 +364,9 @@ class DiscRNNG(nn.Module):
                     raise RuntimeError('most probable action is an illegal one')
             else:
                 if self._check_push_np():
-                    self._push_nt(self._get_nt(max_action_id))
+                    # self._push_nt(self._get_nt(max_action_id))
+                    push_prod = self.productions[self._get_prod_id(max_action_id)]
+                    self._push_prod(push_prod)
                 else:
                     raise RuntimeError('most probable action is an illegal one')
             self._append_history(max_action_id)
@@ -468,8 +470,11 @@ class DiscRNNG(nn.Module):
             if top_early.next_open_nt_id >= len(top_early.production):
                 #done all NT in rule
                 return False
+
+            #next predicted lhs of rule must == next open nt in early stack
             return str(pushed_prod.lhs()) == self.next_early_open_nt()
         else:
+            #first rule must be TOP -> S
             return str(pushed_prod) == 'TOP -> S'
 
     def _check_shift(self) -> bool:

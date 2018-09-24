@@ -1,18 +1,20 @@
 # coding=utf-8
 from collections import Counter
+from typing import List
 
 from torchtext.data import Field
 from torchtext.vocab import Vocab
+from nltk.grammar import Production
 
-def NP(production):
-    return 'NP(' + production + ')'
+def NP(production: Production):
+    return 'NP(' + str(production) + ')'
 
 SHIFT = 'SHIFT'
 REDUCE = 'REDUCE'
 train_grammar_file = './data/train_grammar.txt'
 
 class ActionRuleField(Field):
-    def __init__(self, nonterm_field: Field, productions,  **kwargs) -> None:
+    def __init__(self, nonterm_field: Field, productions: List[Production],  **kwargs) -> None:
         unk_token = kwargs.pop('unk_token', None)
         pad_token = kwargs.pop('pad_token', None)
         super().__init__(unk_token=unk_token, pad_token=pad_token, **kwargs)

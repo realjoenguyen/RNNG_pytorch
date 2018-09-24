@@ -92,9 +92,9 @@ class Trainer(object):
                  debug_mode=False,
                  use_unk=True,
                  patience=5,
-                 resume_file=None,
+                 resume_dir=None,
                  optimizer='adam',
-                 exclude_word_embs=False,
+                 exclude_word_emb=False,
                  use_cache=False,
                  cache_path="./cache"):
 
@@ -108,10 +108,10 @@ class Trainer(object):
         self.clip = clip
         self.test_corpus = test_corpus
         self.cache_path = cache_path
-        self.resume_dir = resume_file
+        self.resume_dir = resume_dir
         self.optimizer_type = optimizer
         self.train_corpus = train_corpus
-        self.exclude_word_embs = exclude_word_embs
+        self.exclude_word_embs = exclude_word_emb
         self.dev_corpus = dev_corpus
         self.rnng_type = rnng_type
         self.lower = lower
@@ -221,7 +221,6 @@ class Trainer(object):
         return dataset, iterator
 
     def process_corpora(self) -> None:
-        # TODO: fix this
         self.train_dataset, self.train_iterator = self.process_each_corpus(self.train_corpus, 'train', shuffle=True)
                                                                            # training=True)
         self.logger.info('Len of train = ' + str(len(self.train_iterator)))
@@ -348,6 +347,8 @@ class Trainer(object):
             # find all unk types
             for id, w in enumerate(raw_token_lst):
                 if unk_lst[id].startswith('unk'):
+                    if unk_lst[id] == 'unk-num':
+                        continue
                     if not w.startswith('unk'):
                         self.singletons.add(w)
 
@@ -461,13 +462,14 @@ class Trainer(object):
                 if origin_raw_words != origin_unk_words:
                     for id, word_id in enumerate(unk_words):
                         cur_unk_word = self.WORDS.vocab.itos[word_id]
-                        if cur_unk_word.startswith('unk'):
+
+                        if cur_unk_word.startswith('unk') and cur_unk_word != 'unk-num': #doesn't replace unk-num
                             singleton_word = self.RAWS.vocab.itos[raw_words[id]]
                             if singleton_word != '<unk>':
                                 if random.random() > 0.5:
                                     unk_words[id] = self.WORDS.vocab.stoi[singleton_word]
                                     cnt_change += 1
-                                    # self.logger.info('Change from ' + cur_unk_word + ' into ' + singleton_word)
+                                    self.logger.info('Change from ' + cur_unk_word + ' into ' + singleton_word)
 
                 self.log_logits, self.pred_action_ids = self.model.forward(unk_words, pos_tags, actions)
 
@@ -506,7 +508,8 @@ class Trainer(object):
                 # cnt += 1
 
             # DEV
-            self.logger.info('Change ' + str(cnt_change) + ' into singleton tokens')
+            # self.logger.info('Change ' + str(cnt_change) + ' unk tokens into singleton tokens')
+            cnt_change = 0
             if self.dev_corpus:
                 dev_meter = self.inference(self.dev_iterator, type_corpus='dev', step=epoch + 1, tf_board=True)
                 if dev_meter.f1 > best_dev_f1:
@@ -549,7 +552,9 @@ class Trainer(object):
     def load_model(self, resume_dir):
         resume_dir = re.sub('\'', '', resume_dir)
         self.logger.info('Get file from dir ' + str(resume_dir))
-        self.resume_file = glob.glob(os.path.join(resume_dir, '*'))[0]
+        self.resume_file_lst = glob.glob(os.path.join(resume_dir, '*'))
+        assert len(self.resume_file_lst) == 1
+        self.resume_file = self.resume_file_lst[0]
         self.logger.info('Loading model from ' + str(self.resume_file))
 
         if self.exclude_word_embs:
@@ -620,9 +625,9 @@ class Trainer(object):
         if self.resume_dir:
             self.load_model(self.resume_dir)
         self.unit_test()
+        # self.inference(self.train_iterator, type_corpus='train', tf_board=True)
         self.training()
         self.inference(self.test_iterator, type_corpus='test', tf_board=True)
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train RNNG network')
@@ -642,15 +647,13 @@ def parse_args():
     parser.add_argument('--cuda', action='store_true')
     parser.add_argument('--max-epochs', type=int, default=1000, metavar='NUMBER')
     parser.add_argument('--patience', type=int, default=5, metavar='NUMBER')
-    parser.add_argument('--resume_file', type=str, default='')
-    parser.add_argument('--exclude_word_embs', action='store_true')
+    parser.add_argument('--resume_dir', type=str, default='')
+    parser.add_argument('--exclude_word_emb', action='store_true')
     parser.add_argument('--use-cache', action='store_true')
     parser.add_argument('--optimizer', type=str, default='adam')
     parser.add_argument('--id', type=int, required=True)
-
     args = parser.parse_args()
     return args
-
 
 if __name__ == '__main__':
     args = parse_args()
