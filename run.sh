@@ -16,7 +16,7 @@ SAVE_TO=./res/
 
 #source ./config_path.sh
 #rm -rf ${SAVE_TO}/*
-#1
+
 python3.5 ./trainer.py \
 --cuda \
 --debug_mode \
@@ -25,8 +25,7 @@ python3.5 ./trainer.py \
 --lemma --save_to ./res/ --emb_path /home/anh/embedding/ --emb_type glove --word_embedding_size 100 \
 --train_grammar_file ./data/train_grammar.txt \
 --dev_corpus ./data/oracle_rule/dev_rule.oracle --test_corpus ./data/oracle_rule/test_rule.oracle \
---learning_rate 0.001 --clip 10 --optimizer adam \
---resume_dir '/home/anh/rnng_all/rnng_self/res/id=4;optimizer=adam;unk=True;new=True;emb_type=glove;lemma=True;lr=0.0010;word=100;clip=20.0/saved_model/'
+--learning_rate 0.001 --clip 10 --optimizer adam
 
 #--use-cache --exclude_word_embs \
 #--lemma \

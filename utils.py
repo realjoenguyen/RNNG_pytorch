@@ -1,6 +1,5 @@
 from nltk.tree import Tree
 
-
 # def add_dummy_pos(tree):
 #     if not isinstance(tree, Tree):
 #         return Tree('XX', [tree])

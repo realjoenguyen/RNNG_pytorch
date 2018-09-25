@@ -1,8 +1,9 @@
 import argparse
+from typing import List, NamedTuple, Optional, Sequence, Sized, Tuple, Union, cast
 import copy
 import pickle
-import re
-from nltk import WordNetLemmatizer
+from nltk.stem.wordnet import WordNetLemmatizer
+
 import shutil
 import numpy as np
 import logging
@@ -17,8 +18,6 @@ import torch
 import torch.optim as optim
 import timeit
 from example import make_example_from_oracles
-# from fields import ActionField
-# from iterator import SimpleIterator
 from models import DiscRNNG
 from oracle import DiscOracle
 from torchtext.data import Iterator
@@ -28,12 +27,21 @@ from tf_logger_class import Logger
 import glob
 import json
 from action_prod_field import ActionRuleField
-# from production import Production
-from nltk.grammar import Production
-import production
-
+from production import get_productions_from_file, Production
 CACHE_DIR = './cache'
+from nltk.corpus import wordnet
 
+def get_wordnet_pos(pos_tag: str):
+    if pos_tag.startswith('J'):
+        return wordnet.ADJ
+    elif pos_tag.startswith('V'):
+        return wordnet.VERB
+    elif pos_tag.startswith('N'):
+        return wordnet.NOUN
+    elif pos_tag.startswith('R'):
+        return wordnet.ADV
+    else:
+        return ''
 
 def load_pretrained_model(type, pretrained_file):
     cache_file = os.path.join('./cache/', type + '_vocab.pkl')
@@ -56,7 +64,6 @@ def load_pretrained_model(type, pretrained_file):
             pickle.dump(pretrained_vocab, f)
         print("Done.", len(pretrained_vocab), " words loaded!")
         return pretrained_vocab
-
 
 class Trainer(object):
     def __init__(self,
@@ -87,9 +94,9 @@ class Trainer(object):
                  cuda=False,
                  batch_size=1,
                  clip=10,
-                 new_corpus=True,
+                 # new_corpus=True,
                  # small_corpus=True,
-                 debug_mode=False,
+                 # debug_mode=False,
                  use_unk=True,
                  patience=5,
                  resume_dir=None,
@@ -104,7 +111,7 @@ class Trainer(object):
         self.use_unk = use_unk
         self.lemma = lemma
         self.emb_type = emb_type
-        self.new_corpus = new_corpus
+        # self.new_corpus = new_corpus
         self.clip = clip
         self.test_corpus = test_corpus
         self.cache_path = cache_path
@@ -138,11 +145,11 @@ class Trainer(object):
         print(self.attributes_dict)
 
         self.singletons = set()
-        self.hper = 'id={};optimizer={};unk={};new={};emb_type={};lemma={};lr={:.4f};word={};clip={}'.format(
+        self.hper = 'id={};optimizer={};unk={};emb_type={};lemma={};lr={:.4f};word={};clip={}'.format(
             self.id,
             self.optimizer_type,
             self.use_unk,
-            self.new_corpus,
+            # self.new_corpus,
             self.emb_type,
             self.lemma,
             self.learning_rate,
@@ -151,8 +158,12 @@ class Trainer(object):
         )
         # self.hper = 'id={}'.format(self.id)
         self.save_to = save_to
-        self.debug_mode = debug_mode
-        self.train_productions = production.get_productions_from_file(train_grammar_file)  # type: List[Production]
+        # self.debug_mode = debug_mode
+        self.grammar_file = train_grammar_file
+
+    def get_grammar(self):
+        self.productions = get_productions_from_file(self.grammar_file)  # type: List[Production]
+        self.logger.info('Done loading grammar from ' + self.grammar_file)
 
     def set_random_seed(self) -> None:
         # self.logger.info('Setting random seed to %d', self.seed)
@@ -164,10 +175,11 @@ class Trainer(object):
         self.logger_path = os.path.join(self.save_to, 'logger.txt')
         logger = logging.getLogger(__name__)
         logger.setLevel(logging.DEBUG)
-        if self.debug_mode:
-            handler = logging.StreamHandler()
-        else:
-            handler = logging.FileHandler(self.logger_path)
+        # if self.debug_mode:
+        handler = logging.StreamHandler()
+        # else:
+        #     handler = logging.FileHandler(self.logger_path)
+
         handler.setLevel(logging.DEBUG)
         formatter = logging.Formatter('[%(asctime)s - %(levelname)s - %(funcName)10s] %(message)s')
         handler.setFormatter(formatter)
@@ -200,7 +212,7 @@ class Trainer(object):
         self.POS_TAGS = Field(pad_token=None)
         self.NONTERMS = Field(pad_token=None)
         # self.ACTIONS = ActionField(self.NONTERMS)
-        self.ACTIONS = ActionRuleField(self.NONTERMS, self.train_productions)
+        self.ACTIONS = ActionRuleField(self.NONTERMS, self.productions)
         self.RAWS = Field(lower=self.lower, pad_token=None)
         # self.LABELS = Field(use_vocab=False, sequential=False)
         self.fields = [
@@ -222,7 +234,7 @@ class Trainer(object):
 
     def process_corpora(self) -> None:
         self.train_dataset, self.train_iterator = self.process_each_corpus(self.train_corpus, 'train', shuffle=True)
-                                                                           # training=True)
+        # training=True)
         self.logger.info('Len of train = ' + str(len(self.train_iterator)))
 
         if self.dev_corpus:
@@ -241,10 +253,10 @@ class Trainer(object):
                     cnt_add_w += 1
                     field.vocab.itos.append(w)
                     field.vocab.stoi[w] = len(field.vocab.itos) - 1
-                else:
-                    self.logger.warning(w + ' is already in the field')
+                # else:
+                # self.logger.warning(w + ' is already in the field')
             if using_vector:
-                self.logger.info('Add ' + str(cnt_add_w) + ' zero vectors into vocab.vectors')
+                # self.logger.info('Add ' + str(cnt_add_w) + ' zero vectors into vocab.vectors')
                 field.vocab.vectors = torch.cat((field.vocab.vectors,
                                                  torch.zeros(cnt_add_w, self.word_embedding_size)), 0)
 
@@ -266,7 +278,7 @@ class Trainer(object):
                 zero_words.append(cur_word)
 
         self.logger.info('There are ' + str(cnt_zero) + ' zero embeddings')
-        print('Zero words = ', zero_words)
+        # print('Zero words = ', zero_words)
         assert cnt_zero > 1
 
         self.POS_TAGS.build_vocab(self.train_dataset)
@@ -299,20 +311,25 @@ class Trainer(object):
             num_layers=self.num_layers,
             dropout=self.dropout,
             pretrained_emb_vec=self.WORDS.vocab.vectors,
-            productions=self.train_productions,
+            productions=self.productions,
             nonterms=self.NONTERMS,
+            words=self.WORDS,
         )
         self.model = DiscRNNG(*model_args, **model_kwargs)
         if self.cuda:
             self.model.cuda()
 
-    def preprocess_token(self, token):
+    def preprocess_token(self, token: str, pos_tag:str):
         if token.startswith('unk') or token == '<unk>':
             return token
 
         if self.lemma:
+            wordnet_pos_tag = get_wordnet_pos(pos_tag)
             wordnet_lemmatizer = WordNetLemmatizer()
-            processed_token = wordnet_lemmatizer.lemmatize(token)
+            if wordnet_pos_tag != '':
+                processed_token = wordnet_lemmatizer.lemmatize(token, wordnet_pos_tag)
+            else:
+                processed_token = wordnet_lemmatizer.lemmatize(token)
         else:
             processed_token = token
 
@@ -331,13 +348,13 @@ class Trainer(object):
 
         while line:
             assert line.startswith('# ')
-            raw = line[2:].strip()
-            pos_tag = f.readline().strip()
-            token = f.readline().strip()
+            raw_str = line[2:].strip()
+            pos_tag_str = f.readline().strip()
+            token_str = f.readline().strip()
             # lower = f.readline().strip()
-            unks = f.readline().strip()
-            unk_lst = [self.preprocess_token(x.lower()) for x in unks.split()]
-            raw_token_lst = [self.preprocess_token(x.lower()) for x in token.split()]
+            unks_str = f.readline().strip()
+            unk_lst = [self.preprocess_token(x.lower(), tag) for x, tag in zip(unks_str.split(), pos_tag_str.split())]
+            raw_token_lst = [self.preprocess_token(x.lower(), tag) for x, tag in zip(token_str.split(), pos_tag_str.split())]
 
             # replace <unk> in raw with specific unk type in unk_lst
             for id, raw_token in enumerate(raw_token_lst):
@@ -347,7 +364,7 @@ class Trainer(object):
             # find all unk types
             for id, w in enumerate(raw_token_lst):
                 if unk_lst[id].startswith('unk'):
-                    if unk_lst[id] == 'unk-num':
+                    if unk_lst[id] == 'unk-num':  # doesn't replace unk-num with number
                         continue
                     if not w.startswith('unk'):
                         self.singletons.add(w)
@@ -359,9 +376,10 @@ class Trainer(object):
                 if line == '':
                     break
                 assert 'NP' in line or line == 'SHIFT' or line == 'REDUCE'
+
                 actions.append(line)
 
-            oracles.append(DiscOracle(actions, pos_tag.split(), unk_lst, raw_token_lst))
+            oracles.append(DiscOracle(actions, pos_tag_str.split(), unk_lst, raw_token_lst))
             # if training:
             #     if raw_token_lst != unk_lst:
             #         oracles.append(DiscOracle(actions, pos_tag.split(), raw_token_lst, raw_token_lst, False))
@@ -371,7 +389,8 @@ class Trainer(object):
         return oracles
 
     def make_dataset(self, corpus, name):
-        cached_corpus = os.path.join(CACHE_DIR, 'cached_' + name + '.pkl')
+        corpus_file_name = os.path.basename(corpus)
+        cached_corpus = os.path.join(CACHE_DIR, corpus_file_name + '.pkl')
         if self.use_cache:
             self.logger.info('Loading cached corpus from ' + cached_corpus)
             oracles = torch.load(cached_corpus)
@@ -442,7 +461,7 @@ class Trainer(object):
         interval_meter = utils.ParsingMeter()
         total_step = 0
         best_dev_f1 = 0
-        # cnt = 0
+        interval_loss = 0
         for epoch in range(self.max_epochs):
             start_time = timeit.default_timer()
             for cnt, instance in enumerate(self.train_iterator):
@@ -462,18 +481,19 @@ class Trainer(object):
                 if origin_raw_words != origin_unk_words:
                     for id, word_id in enumerate(unk_words):
                         cur_unk_word = self.WORDS.vocab.itos[word_id]
-
-                        if cur_unk_word.startswith('unk') and cur_unk_word != 'unk-num': #doesn't replace unk-num
+                        if cur_unk_word.startswith('unk') and cur_unk_word != 'unk-num':  # doesn't replace unk-num
                             singleton_word = self.RAWS.vocab.itos[raw_words[id]]
-                            if singleton_word != '<unk>':
+                            if singleton_word != '<unk>' and not singleton_word.startswith('unk'):
                                 if random.random() > 0.5:
                                     unk_words[id] = self.WORDS.vocab.stoi[singleton_word]
                                     cnt_change += 1
-                                    self.logger.info('Change from ' + cur_unk_word + ' into ' + singleton_word)
+                                    # self.logger.info('Change from ' + cur_unk_word + ' into ' + singleton_word)
 
                 self.log_logits, self.pred_action_ids = self.model.forward(unk_words, pos_tags, actions)
-
                 self.training_loss = self.losser(self.log_logits, instance.actions.view(-1))
+                assert not torch.isinf(self.training_loss)
+                assert not torch.isnan(self.training_loss)
+                interval_loss += self.training_loss.item()
                 self.training_loss.backward()
                 if self.clip > 0:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip)
@@ -493,7 +513,7 @@ class Trainer(object):
                             self.max_epochs,
                             cnt + 1,
                             len(self.train_iterator),
-                            self.training_loss.item(),
+                            interval_loss / self.log_interval,
                             epoch_meter.f1,
                             interval_meter.error_tree,
                             elapsed))
@@ -504,8 +524,8 @@ class Trainer(object):
                     for tag, value in info.items():
                         self.tf_logger.scalar_summary(tag=tag, value=value, step=total_step + 1)
                     total_step += 1
+                    interval_loss = 0
                     interval_meter.reset()
-                # cnt += 1
 
             # DEV
             # self.logger.info('Change ' + str(cnt_change) + ' unk tokens into singleton tokens')
@@ -541,7 +561,6 @@ class Trainer(object):
         self.logger.info('Testing on ' + type_corpus)
         infer_meter = self.get_info_infer(iterator)
         self.logger.info('F1: {}, Error tree {}'.format(infer_meter.f1, infer_meter.error_tree))
-
         if tf_board:
             test_info = {type_corpus + '_F1': infer_meter.f1,
                          type_corpus + '_error_tree': infer_meter.error_tree}
@@ -557,15 +576,23 @@ class Trainer(object):
         self.resume_file = self.resume_file_lst[0]
         self.logger.info('Loading model from ' + str(self.resume_file))
 
-        if self.exclude_word_embs:
-            self.logger.info('Excluding word embedding from pretrained model')
-            pretrained_dict = torch.load(self.resume_file)
-            model_dict = self.model.state_dict()
-            pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'word_embedding' not in k}
-            model_dict.update(pretrained_dict)
-            self.model.load_state_dict(model_dict)
-        else:
-            self.model.load_state_dict(torch.load(self.resume_file))
+        # if self.exclude_word_embs:
+        #     self.logger.info('Excluding word embedding from pretrained model')
+        #     pretrained_dict = torch.load(self.resume_file)
+        #     model_dict = self.model.state_dict()
+        #     pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'word_embedding' not in k}
+        #     model_dict.update(pretrained_dict)
+        #     self.model.load_state_dict(model_dict)
+        # else:
+        # pretrained_dict = torch.load(self.resume_file)
+        # model_dict = self.model.state_dict()
+        # exclude_lst = [k for k in pretrained_dict.keys() if pretrained_dict[k].size() != model_dict[k].size()]
+        # pretrained_dict = {k: v for k, v in pretrained_dict.items() if v.size() == model_dict[k].size()}
+        # print('WARNING: Excluding', exclude_lst)
+        # model_dict.update(pretrained_dict)
+        # self.model.load_state_dict(model_dict)
+
+        self.model.load_state_dict(torch.load(self.resume_file))
         self.logger.info('Done loading.')
 
     def check_grad(self):
@@ -579,6 +606,7 @@ class Trainer(object):
         self.training_loss = self.losser(self.log_logits, instance.actions.view(-1))
         assert self.training_loss.item() != 0
         assert not torch.isinf(self.training_loss)
+        assert not torch.isnan(self.training_loss)
         self.logger.warning('Loss = ' + str(self.training_loss.item()))
 
         self.training_loss.backward()
@@ -616,6 +644,7 @@ class Trainer(object):
         self.pretrainedVec = load_pretrained_model(self.emb_type, self.pretrained_emb_path)
         self.set_random_seed()
         self.prepare_output_dir()
+        self.get_grammar()
         self.init_fields()
         self.process_corpora()
         self.build_vocabularies()
@@ -631,29 +660,30 @@ class Trainer(object):
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train RNNG network')
-    parser.add_argument('-t', '--train-corpus', required=True, metavar='FILE', help='path to train corpus')
+    parser.add_argument('-t', '--train_corpus', required=True, metavar='FILE', help='path to train corpus')
     parser.add_argument('--train_grammar_file', required=True, metavar='FILE')
-    parser.add_argument('-s', '--save-to', required=True, metavar='DIR')
-    parser.add_argument('--dev-corpus', metavar='FILE', help='path to dev corpus')
-    parser.add_argument('--test-corpus', metavar='FILE')
-    parser.add_argument('--emb-path', required=True, type=str, help='Pretrained word emb')
-    parser.add_argument('--emb-type', type=str, default='glove', help='Type of embedding')
-    parser.add_argument('--word-embedding-size', type=int, default=100, metavar='NUMBER')
-    parser.add_argument('--learning-rate', type=float, default=0.05, metavar='NUMBER')
+    parser.add_argument('-s', '--save_to', required=True, metavar='DIR')
+    parser.add_argument('--dev_corpus', metavar='FILE', help='path to dev corpus')
+    parser.add_argument('--test_corpus', metavar='FILE')
+    parser.add_argument('--emb_path', required=True, type=str, help='Pretrained word emb')
+    parser.add_argument('--emb_type', type=str, default='glove', help='Type of embedding')
+    parser.add_argument('--word_embedding_size', type=int, default=100, metavar='NUMBER')
+    parser.add_argument('--learning_rate', type=float, default=0.05, metavar='NUMBER')
     parser.add_argument('--clip', type=float, default=10, metavar='NUMBER')
-    parser.add_argument('--debug_mode', action='store_true')
-    parser.add_argument('--new-corpus', action='store_true')
+    # parser.add_argument('--debug_mode', action='store_true')
+    # parser.add_argument('--new_corpus', action='store_true')
     parser.add_argument('--lemma', action='store_true')
     parser.add_argument('--cuda', action='store_true')
-    parser.add_argument('--max-epochs', type=int, default=1000, metavar='NUMBER')
+    parser.add_argument('--max_epochs', type=int, default=1000, metavar='NUMBER')
     parser.add_argument('--patience', type=int, default=5, metavar='NUMBER')
     parser.add_argument('--resume_dir', type=str, default='')
     parser.add_argument('--exclude_word_emb', action='store_true')
-    parser.add_argument('--use-cache', action='store_true')
+    parser.add_argument('--use_cache', action='store_true')
     parser.add_argument('--optimizer', type=str, default='adam')
     parser.add_argument('--id', type=int, required=True)
     args = parser.parse_args()
     return args
+
 
 if __name__ == '__main__':
     args = parse_args()

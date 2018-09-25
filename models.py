@@ -1,6 +1,6 @@
 # coding=utf-8
-# from production import Production
-from nltk.grammar import Production
+from timeit import default_timer as timer
+import nltk
 from typing import List, NamedTuple, Optional, Sequence, Sized, Tuple, Union, cast
 from typing import Dict  # noqa
 
@@ -12,7 +12,22 @@ import torch.nn.functional as F
 import torch.nn.init as init
 
 from self_typing import WordId, NTId, ActionId
+from production import Production
 
+# Production = NamedTuple('Production', [('production', nltk.grammar.Production),
+#                                        ('lhs', str),
+#                                        ('rhs', List[str]),
+#                                        ])
+
+StackElement = NamedTuple('StackElement', [('subtree', Union[WordId, Tree]),
+                                           ('production', Union[Production, str]),
+                                           ('is_open_np', bool),
+                                           ('emb', Variable),
+                                           ])
+
+EarlyElement = NamedTuple('EarlyElement', [('production', Production),
+                                           ('next_open_nt_id', int),
+                                           ])
 
 class EmptyStackError(Exception):
     def __init__(self):
@@ -106,31 +121,11 @@ def log_softmax(inputs: Variable, restrictions: Optional[torch.LongTensor] = Non
         -float('inf')))
     return F.log_softmax(inputs + addend)
 
-
-StackElement = NamedTuple('StackElement', [('subtree', Union[WordId, Tree]),
-                                           ('production', Union[Production, str]),
-                                           ('is_open_np', bool),
-                                           ('emb', Variable),
-                                           ])
-
-EarlyElement = NamedTuple('EarlyElement', [('production', Production),
-                                           ('next_open_nt_id', int),
-                                           ])
-
-
 def is_scan_prod(prod: Production) -> bool:
-    return [str(e) for e in prod.rhs()] == ['<w>']
+    # return [str(e) for e in prod.rhs()] == ['<w>']
+    return prod.rhs == ['<w>']
 
-
-# (S -> NP VP ( NP -> ... )
-# (S -> NP VP | (NP a b c) |
-# (S | NP | VP
-# (S -> NP VP | VP ->
-
-# S -> NP NP | NP -> w
-# S | (NP a b c)
 import torchtext
-
 
 class DiscRNNG(nn.Module):
     MAX_OPEN_NP = 100
@@ -152,6 +147,7 @@ class DiscRNNG(nn.Module):
                  pretrained_emb_vec,
                  productions: List[Production],
                  nonterms: torchtext.data.Field,
+                 words: torchtext.data.Field,
                  ) -> None:
         super().__init__()
         self.num_words = num_words
@@ -165,8 +161,9 @@ class DiscRNNG(nn.Module):
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.dropout = dropout
-        self.productions = productions  # type: List[Production]
+        self.productions = productions
         self.NONTERMS = nonterms
+        self.WORDS = words
 
         # Parser states
         self._stack = []  # type: List[StackElement]
@@ -250,9 +247,10 @@ class DiscRNNG(nn.Module):
 
     def next_early_open_nt(self) -> str:
         assert len(self._early_stack) > 0
-        top = self._early_stack[-1]
-        assert top.next_open_nt_id < len(top.production)
-        return str(top.production.rhs()[top.next_open_nt_id])
+        top = self._early_stack[-1] #type: EarlyElement
+        assert top.next_open_nt_id < len(top.production.data)
+        # return str(top.production.rhs()[top.next_open_nt_id])
+        return top.production.rhs[top.next_open_nt_id]
 
     @property
     def finished(self) -> bool:
@@ -329,14 +327,19 @@ class DiscRNNG(nn.Module):
                     break
             elif action_id == self.REDUCE_ID:
                 if self._check_reduce():
+                    # start = timer()
                     self._reduce()
+                    # print ('reduce = ', timer() - start)
                 else:
                     break
             else:
                 if self._check_push_np():
                     # self._push_nt(self._get_nt(action_id))
-                    push_prod = self.productions[self._get_prod_id(action_id)]
-                    self._push_prod(push_prod)
+                    # start = timer()
+                    # push_prod = self.productions[self._get_prod_id(action_id)]
+                    # self._push_prod(push_prod)
+                    self._push_prod(self._get_prod_id(action_id))
+                    # print ('push = ', timer() - start)
                 else:
                     break
             self._append_history(action_id)
@@ -365,8 +368,10 @@ class DiscRNNG(nn.Module):
             else:
                 if self._check_push_np():
                     # self._push_nt(self._get_nt(max_action_id))
-                    push_prod = self.productions[self._get_prod_id(max_action_id)]
-                    self._push_prod(push_prod)
+                    # push_prod = self.productions[self._get_prod_id(max_action_id)]
+                    # self._push_prod(push_prod)
+                    self._push_prod(self._get_prod_id(max_action_id))
+
                 else:
                     raise RuntimeError('most probable action is an illegal one')
             self._append_history(max_action_id)
@@ -467,15 +472,14 @@ class DiscRNNG(nn.Module):
         pushed_prod = self.productions[self._get_prod_id(action_id)]
         if len(self._early_stack) > 0:
             top_early = self._early_stack[-1]
-            if top_early.next_open_nt_id >= len(top_early.production):
-                #done all NT in rule
+            if top_early.next_open_nt_id >= len(top_early.production.data):
+                # done all NT in rule
                 return False
-
-            #next predicted lhs of rule must == next open nt in early stack
-            return str(pushed_prod.lhs()) == self.next_early_open_nt()
+            # next predicted lhs of rule must == next open nt in early stack
+            return pushed_prod.lhs == self.next_early_open_nt()
         else:
-            #first rule must be TOP -> S
-            return str(pushed_prod) == 'TOP -> S'
+            # first rule must be TOP -> sth
+            return pushed_prod.lhs == 'TOP'
 
     def _check_shift(self) -> bool:
         return len(self._buffer) > 0 and self._num_open_np > 0 and len(self._stack) > 0
@@ -499,11 +503,15 @@ class DiscRNNG(nn.Module):
     #     self.stack_encoder.push(self._nt_emb[nt_id])
     #     self._num_open_nt += 1
 
-    def _push_prod(self, cur_prod):
+    def _push_prod(self, prod_id: int):
         assert self._check_push_np()
 
-        lhs_nt_id = self.NONTERMS.vocab.stoi[str(cur_prod.lhs())]
-        rhs_nt_ids = [self.NONTERMS.vocab.stoi[str(nt)] for nt in cur_prod.rhs()]
+        # lhs_nt_id = self.NONTERMS.vocab.stoi[str(cur_prod.lhs())]
+        # rhs_nt_ids = [self.NONTERMS.vocab.stoi[str(nt)] for nt in cur_prod.rhs()]
+
+        cur_prod = self.productions[prod_id]
+        lhs_nt_id = self.NONTERMS.vocab.stoi[cur_prod.lhs]
+        rhs_nt_ids = [self.NONTERMS.vocab.stoi[nt] for nt in cur_prod.rhs]
 
         lhs_emb = self._nt_emb[lhs_nt_id]
         rhs_embs = [self._nt_emb[rhs_nt_id] for rhs_nt_id in rhs_nt_ids]
@@ -526,13 +534,13 @@ class DiscRNNG(nn.Module):
 
         word_id = self._buffer.pop()
         self.buffer_encoder.pop()
-        self._stack.append(StackElement(word_id, 'token', False, self._word_emb[word_id], ))
+        self._stack.append(StackElement(word_id, self.WORDS.vocab.itos[word_id], False, self._word_emb[word_id], ))
         self.stack_encoder.push(self._word_emb[word_id])
 
     def _reduce(self) -> None:
         assert self._check_reduce()
 
-        children = []
+        children = [] #type: StackElement
         while len(self._stack) > 0 and not self._stack[-1].is_open_np:
             children.append(self._stack.pop())
             self.stack_encoder.pop()
@@ -548,8 +556,10 @@ class DiscRNNG(nn.Module):
         # check if chilren label match with rhs of rule in open_nt
         # if open_np.production != None:
         if not is_scan_prod(open_np.production):
-            rhs_nt = [str(e) for e in open_np.production.rhs()]
-            label_children = [str(e.lhs()) for e in child_prod if e != 'token']
+            # rhs_nt = [str(e) for e in open_np.production.rhs()]
+            # label_children = [str(e.lhs()) for e in child_prod if e != 'token']
+            rhs_nt = open_np.production.rhs
+            label_children = [e.lhs for e in child_prod if type(e) == Production]
             assert rhs_nt == label_children
 
         assert isinstance(open_np.subtree, Tree)
@@ -568,7 +578,7 @@ class DiscRNNG(nn.Module):
         top_early = self._early_stack[-1]
 
         # NT -> w *
-        if is_scan_prod(top_early.production) or top_early.next_open_nt_id > len(top_early.production):
+        if is_scan_prod(top_early.production) or top_early.next_open_nt_id > len(top_early.production.data):
             # finish this rule
             self._early_stack.pop()
             if len(self._early_stack) > 0:

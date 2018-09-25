@@ -24,7 +24,7 @@ class ActionRuleField(Field):
     def build_vocab(self, *args, **kwargs):
         specials = [REDUCE, SHIFT]
         for prod in self.productions:
-            specials.append(NP(prod))
+            specials.append(NP(prod.data))
         self.vocab = Vocab(Counter(), specials=specials)
 
     # def numericalize(self, arr, **kwargs) -> Variable:
