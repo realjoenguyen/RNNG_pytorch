@@ -17,5 +17,22 @@ SAVE_TO=./res/
 #source ./config_path.sh
 #rm -rf ${SAVE_TO}/*
 #1
-python3.5 ./trainer.py --use-cache --exclude_word_embs --lemma --max-epochs 1000 --id 4 --train-corpus ./data/oracle_new/train.oracle --dev-corpus ./data/oracle_new/dev.oracle --test-corpus ./data/oracle_new/test.oracle --save-to ./res/ --emb-path /home/anh/embedding/ --new-corpus --cuda --emb-type glove --learning-rate 0.001 --clip 20 --word-embedding-size 100 --optimizer adam --debug_mode --resume_file '/home/anh/rnng_all/rnng_self/res/optimizer=adam;unk=True;new=True;emb_type=glove;lemma=False;lr=0.0010;word=100;clip=40.0/saved_model'
+python3.5 ./trainer.py \
+--cuda \
+--debug_mode \
+--max_epochs 1000 --id 0 \
+--use_cache --train_corpus ./data/oracle_rule/train_rule.oracle \
+--lemma --save_to ./res/ --emb_path /home/anh/embedding/ --emb_type glove --word_embedding_size 100 \
+--train_grammar_file ./data/train_grammar.txt \
+--dev_corpus ./data/oracle_rule/dev_rule.oracle --test_corpus ./data/oracle_rule/test_rule.oracle \
+--learning_rate 0.001 --clip 10 --optimizer adam \
+--resume_dir '/home/anh/rnng_all/rnng_self/res/id=4;optimizer=adam;unk=True;new=True;emb_type=glove;lemma=True;lr=0.0010;word=100;clip=20.0/saved_model/'
 
+#--use-cache --exclude_word_embs \
+#--lemma \
+#--max-epochs 1000 \
+#--id 0 \
+#--train-corpus ./data/oracle_new/train.oracle --dev-corpus ./data/oracle_new/dev.oracle --test-corpus ./data/oracle_new/test.oracle \
+#--save-to ./res/ --emb-path /home/anh/embedding/ \
+#--cuda --emb-type glove --learning-rate 0.001 --clip 20 --word-embedding-size 100 --optimizer adam --debug_mode \
+#--resume_file '/home/anh/rnng_all/rnng_self/res/optimizer=adam;unk=True;new=True;emb_type=glove;lemma=False;lr=0.0010;word=100;clip=40.0/saved_model'
