@@ -1,3 +1,5 @@
+import pprint
+
 import argparse
 from typing import List, NamedTuple, Optional, Sequence, Sized, Tuple, Union, cast
 import copy
@@ -96,7 +98,7 @@ class Trainer(object):
                  clip=10,
                  # new_corpus=True,
                  # small_corpus=True,
-                 # debug_mode=False,
+                 debug_mode=False,
                  use_unk=True,
                  patience=5,
                  resume_dir=None,
@@ -142,7 +144,8 @@ class Trainer(object):
         else:
             self.pretrained_emb_path = os.path.join(emb_path, 'sskip.100.vectors')
         self.attributes_dict = self.__dict__.copy()
-        print(self.attributes_dict)
+        # print(self.attributes_dict)
+        pprint.pprint(self.attributes_dict)
 
         self.singletons = set()
         self.hper = 'id={};optimizer={};unk={};emb_type={};lemma={};lr={:.4f};word={};clip={}'.format(
@@ -158,7 +161,7 @@ class Trainer(object):
         )
         # self.hper = 'id={}'.format(self.id)
         self.save_to = save_to
-        # self.debug_mode = debug_mode
+        self.debug_mode = debug_mode
         self.grammar_file = train_grammar_file
 
     def get_grammar(self):
@@ -172,25 +175,28 @@ class Trainer(object):
 
     def prepare_output_dir(self) -> None:
         # logger
+        # self.logger.info('Preparing output directory in %s', self.save_to)
+        print ('Preparing output directory in', self.save_to)
+        self.save_to = os.path.join(self.save_to, self.hper)
+        if os.path.exists(self.save_to):
+            # self.logger.warning('There exists the same' + str(self.save_to))
+            print ('There exists the same', self.save_to)
+        os.makedirs(self.save_to, exist_ok=True)
+
         self.logger_path = os.path.join(self.save_to, 'logger.txt')
         logger = logging.getLogger(__name__)
         logger.setLevel(logging.DEBUG)
-        # if self.debug_mode:
-        handler = logging.StreamHandler()
-        # else:
-        #     handler = logging.FileHandler(self.logger_path)
+        if self.debug_mode:
+            handler = logging.StreamHandler()
+        else:
+            handler = logging.FileHandler(self.logger_path)
+            print ('Logging into', self.logger_path)
 
         handler.setLevel(logging.DEBUG)
         formatter = logging.Formatter('[%(asctime)s - %(levelname)s - %(funcName)10s] %(message)s')
         handler.setFormatter(formatter)
         logger.addHandler(handler)
         self.logger = logger
-
-        self.logger.info('Preparing output directory in %s', self.save_to)
-        self.save_to = os.path.join(self.save_to, self.hper)
-        if os.path.exists(self.save_to):
-            self.logger.warning('There exists the same' + str(self.save_to))
-        os.makedirs(self.save_to, exist_ok=True)
         self.fields_dict_path = os.path.join(self.save_to, 'fields_dict.pkl')
         self.model_metadata_path = os.path.join(self.save_to, 'model_metadata.json')
 
@@ -670,7 +676,7 @@ def parse_args():
     parser.add_argument('--word_embedding_size', type=int, default=100, metavar='NUMBER')
     parser.add_argument('--learning_rate', type=float, default=0.05, metavar='NUMBER')
     parser.add_argument('--clip', type=float, default=10, metavar='NUMBER')
-    # parser.add_argument('--debug_mode', action='store_true')
+    parser.add_argument('--debug_mode', action='store_true')
     # parser.add_argument('--new_corpus', action='store_true')
     parser.add_argument('--lemma', action='store_true')
     parser.add_argument('--cuda', action='store_true')

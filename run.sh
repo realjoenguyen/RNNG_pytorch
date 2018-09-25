@@ -19,7 +19,6 @@ SAVE_TO=./res/
 
 python3.5 ./trainer.py \
 --cuda \
---debug_mode \
 --max_epochs 1000 --id 0 \
 --use_cache --train_corpus ./data/oracle_rule/train_rule.oracle \
 --lemma --save_to ./res/ --emb_path /home/anh/embedding/ --emb_type glove --word_embedding_size 100 \
