@@ -30,8 +30,10 @@ import glob
 import json
 from action_prod_field import ActionRuleField
 from production import get_productions_from_file, Production
+
 CACHE_DIR = './cache'
 from nltk.corpus import wordnet
+
 
 def get_wordnet_pos(pos_tag: str):
     if pos_tag.startswith('J'):
@@ -44,6 +46,7 @@ def get_wordnet_pos(pos_tag: str):
         return wordnet.ADV
     else:
         return ''
+
 
 def load_pretrained_model(type, pretrained_file):
     cache_file = os.path.join('./cache/', type + '_vocab.pkl')
@@ -66,6 +69,7 @@ def load_pretrained_model(type, pretrained_file):
             pickle.dump(pretrained_vocab, f)
         print("Done.", len(pretrained_vocab), " words loaded!")
         return pretrained_vocab
+
 
 class Trainer(object):
     def __init__(self,
@@ -176,11 +180,11 @@ class Trainer(object):
     def prepare_output_dir(self) -> None:
         # logger
         # self.logger.info('Preparing output directory in %s', self.save_to)
-        print ('Preparing output directory in', self.save_to)
+        print('Preparing output directory in', self.save_to)
         self.save_to = os.path.join(self.save_to, self.hper)
         if os.path.exists(self.save_to):
             # self.logger.warning('There exists the same' + str(self.save_to))
-            print ('There exists the same', self.save_to)
+            print('There exists the same', self.save_to)
         os.makedirs(self.save_to, exist_ok=True)
 
         self.logger_path = os.path.join(self.save_to, 'logger.txt')
@@ -190,7 +194,7 @@ class Trainer(object):
             handler = logging.StreamHandler()
         else:
             handler = logging.FileHandler(self.logger_path)
-            print ('Logging into', self.logger_path)
+            print('Logging into', self.logger_path)
 
         handler.setLevel(logging.DEBUG)
         formatter = logging.Formatter('[%(asctime)s - %(levelname)s - %(funcName)10s] %(message)s')
@@ -325,7 +329,7 @@ class Trainer(object):
         if self.cuda:
             self.model.cuda()
 
-    def preprocess_token(self, token: str, pos_tag:str):
+    def preprocess_token(self, token: str, pos_tag: str):
         token = token.lower()
         if token.startswith('unk') or token == '<unk>':
             return token
@@ -376,7 +380,7 @@ class Trainer(object):
                     if unk_lst[id] == 'unk-num':  # doesn't replace unk-num with number
                         continue
                     if not w.startswith('unk'):
-                        self.singletons.add(w)
+                        self.singletons.add(self.preprocess_token(w, pos_tag_str.split()[id]))
 
             # get action seqs
             actions = []
@@ -385,7 +389,6 @@ class Trainer(object):
                 if line == '':
                     break
                 assert 'NP' in line or line == 'SHIFT' or line == 'REDUCE'
-
                 actions.append(line)
 
             oracles.append(DiscOracle(raw_seq, actions, pos_tag_str.split(), unk_lst, raw_token_lst))
@@ -484,7 +487,7 @@ class Trainer(object):
 
                 # replace unk
                 origin_unk_words = self.id2original(self.WORDS, instance.words)
-                origin_raw_words = instance.raws[0] #type: List[str]
+                origin_raw_words = instance.raws[0]  # type: List[str]
                 if origin_raw_words != origin_unk_words:
                     for id, word_id in enumerate(unk_words):
                         cur_unk_word = self.WORDS.vocab.itos[word_id]
@@ -668,6 +671,7 @@ class Trainer(object):
         self.training()
         # self.inference(self.train_iterator, type_corpus='train', tf_board=True)
         self.inference(self.test_iterator, type_corpus='test', tf_board=True)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train RNNG network')
