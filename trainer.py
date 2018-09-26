@@ -15,7 +15,7 @@ import re
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from PYEVALB import scorer
 from PYEVALB import parser
-from torchtext.data import Dataset, Field
+from torchtext.data import Dataset, Field, RawField
 import torch
 import torch.optim as optim
 import timeit
@@ -219,13 +219,14 @@ class Trainer(object):
         self.NONTERMS = Field(pad_token=None)
         # self.ACTIONS = ActionField(self.NONTERMS)
         self.ACTIONS = ActionRuleField(self.NONTERMS, self.productions)
-        self.RAWS = Field(lower=self.lower, pad_token=None)
-        # self.LABELS = Field(use_vocab=False, sequential=False)
+        # self.RAWS = Field(lower=self.lower, pad_token=None)
+        self.RAWS = RawField()
+        self.SEQ = RawField()
         self.fields = [
+            ('raw_seq', self.SEQ),
             ('actions', self.ACTIONS), ('nonterms', self.NONTERMS),
             ('pos_tags', self.POS_TAGS), ('words', self.WORDS),
             ('raws', self.RAWS),
-            # ('labels', self.LABELS)
         ]
 
     def process_each_corpus(self, corpus, name=None, shuffle=True):
@@ -293,7 +294,7 @@ class Trainer(object):
 
         self.ACTIONS.build_vocab()
         assert self.ACTIONS.vocab.itos[2] == 'NP(TOP -> S)'
-        self.RAWS.build_vocab(self.train_dataset)
+        # self.RAWS.build_vocab(self.train_dataset)
 
         self.num_words = len(self.WORDS.vocab)
         self.num_pos = len(self.POS_TAGS.vocab)
@@ -326,6 +327,7 @@ class Trainer(object):
             self.model.cuda()
 
     def preprocess_token(self, token: str, pos_tag:str):
+        token = token.lower()
         if token.startswith('unk') or token == '<unk>':
             return token
 
@@ -354,13 +356,15 @@ class Trainer(object):
 
         while line:
             assert line.startswith('# ')
-            raw_str = line[2:].strip()
+            raw_seq = line[2:].strip()
             pos_tag_str = f.readline().strip()
-            token_str = f.readline().strip()
+            raw_token_str = f.readline().strip()
             # lower = f.readline().strip()
             unks_str = f.readline().strip()
             unk_lst = [self.preprocess_token(x.lower(), tag) for x, tag in zip(unks_str.split(), pos_tag_str.split())]
-            raw_token_lst = [self.preprocess_token(x.lower(), tag) for x, tag in zip(token_str.split(), pos_tag_str.split())]
+            # raw_token_lst = [self.preprocess_token(x.lower(), tag) for x, tag in zip(raw_token_str.split(), pos_tag_str.split())]
+            # raw_token_lst = [self.preprocess_token(x.lower(), tag) for x, tag in zip(token_str.split(), pos_tag_str.split())]
+            raw_token_lst = [x for x in raw_token_str.split()]
 
             # replace <unk> in raw with specific unk type in unk_lst
             for id, raw_token in enumerate(raw_token_lst):
@@ -385,7 +389,7 @@ class Trainer(object):
 
                 actions.append(line)
 
-            oracles.append(DiscOracle(actions, pos_tag_str.split(), unk_lst, raw_token_lst))
+            oracles.append(DiscOracle(raw_seq, actions, pos_tag_str.split(), unk_lst, raw_token_lst))
             # if training:
             #     if raw_token_lst != unk_lst:
             #         oracles.append(DiscOracle(actions, pos_tag.split(), raw_token_lst, raw_token_lst, False))
@@ -423,16 +427,15 @@ class Trainer(object):
     def get_eval_metrics(self, instance, pred_action_ids):
         assert type(pred_action_ids) == list
         pred_actions = self.id2original(self.ACTIONS, pred_action_ids)
-        gold_actions = self.id2original(self.ACTIONS, instance.actions)
 
-        tokens = self.id2original(self.WORDS, instance.words)
+        tokens = instance.raws[0]
         pos_tags = self.id2original(self.POS_TAGS, instance.pos_tags)
 
         measure = scorer.Scorer()
-        golden_tree_seq = utils.actions2treestr(gold_actions, tokens, pos_tags)
+        golden_tree_seq = instance.raw_seq[0]
         gold_tree = parser.create_from_bracket_string(golden_tree_seq)
         try:
-            pred_tree_seq = utils.actions2treestr(pred_actions, tokens, pos_tags)
+            pred_tree_seq = utils.action2treestr(pred_actions, tokens, pos_tags)
             pred_tree = parser.create_from_bracket_string(pred_tree_seq)
             ret = measure.score_trees(gold_tree, pred_tree)
         except:
@@ -479,19 +482,19 @@ class Trainer(object):
                 unk_words = instance.words.view(-1)
                 pos_tags = instance.pos_tags.view(-1)
                 actions = instance.actions.view(-1)
-                raw_words = instance.raws.view(-1)
 
                 # replace unk
                 origin_unk_words = self.id2original(self.WORDS, instance.words)
-                origin_raw_words = self.id2original(self.RAWS, instance.raws)
+                origin_raw_words = instance.raws[0] #type: List[str]
                 if origin_raw_words != origin_unk_words:
                     for id, word_id in enumerate(unk_words):
                         cur_unk_word = self.WORDS.vocab.itos[word_id]
                         if cur_unk_word.startswith('unk') and cur_unk_word != 'unk-num':  # doesn't replace unk-num
-                            singleton_word = self.RAWS.vocab.itos[raw_words[id]]
-                            if singleton_word != '<unk>' and not singleton_word.startswith('unk'):
+                            pos_tag_singleton = self.POS_TAGS.vocab.itos[pos_tags[id]]
+                            singleton = self.preprocess_token(origin_raw_words[id], pos_tag_singleton)
+                            if singleton != '<unk>' and not singleton.startswith('unk'):
                                 if random.random() > 0.5:
-                                    unk_words[id] = self.WORDS.vocab.stoi[singleton_word]
+                                    unk_words[id] = self.WORDS.vocab.stoi[singleton]
                                     cnt_change += 1
                                     # self.logger.info('Change from ' + cur_unk_word + ' into ' + singleton_word)
 
@@ -537,6 +540,8 @@ class Trainer(object):
             # self.logger.info('Change ' + str(cnt_change) + ' unk tokens into singleton tokens')
             cnt_change = 0
             if self.dev_corpus:
+                if best_dev_f1 == 0:
+                    self.save_model(epoch + 1)
                 dev_meter = self.inference(self.dev_iterator, type_corpus='dev', step=epoch + 1, tf_board=True)
                 if dev_meter.f1 > best_dev_f1:
                     best_dev_f1 = dev_meter.f1
@@ -581,23 +586,6 @@ class Trainer(object):
         assert len(self.resume_file_lst) == 1
         self.resume_file = self.resume_file_lst[0]
         self.logger.info('Loading model from ' + str(self.resume_file))
-
-        # if self.exclude_word_embs:
-        #     self.logger.info('Excluding word embedding from pretrained model')
-        #     pretrained_dict = torch.load(self.resume_file)
-        #     model_dict = self.model.state_dict()
-        #     pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'word_embedding' not in k}
-        #     model_dict.update(pretrained_dict)
-        #     self.model.load_state_dict(model_dict)
-        # else:
-        # pretrained_dict = torch.load(self.resume_file)
-        # model_dict = self.model.state_dict()
-        # exclude_lst = [k for k in pretrained_dict.keys() if pretrained_dict[k].size() != model_dict[k].size()]
-        # pretrained_dict = {k: v for k, v in pretrained_dict.items() if v.size() == model_dict[k].size()}
-        # print('WARNING: Excluding', exclude_lst)
-        # model_dict.update(pretrained_dict)
-        # self.model.load_state_dict(model_dict)
-
         self.model.load_state_dict(torch.load(self.resume_file))
         self.logger.info('Done loading.')
 
@@ -639,11 +627,29 @@ class Trainer(object):
             if old_para.equal(new_para[1]):
                 self.logger.warning('Same para at ' + new_para[0])
 
+    def check_action2treeseq(self):
+        instance = next(iter(self.train_iterator))
+        action_str_lst = self.id2original(self.ACTIONS, instance.actions)
+        pos_tags = self.id2original(self.POS_TAGS, instance.pos_tags)
+        converted_seq = utils.action2treestr(action_str_lst, instance.raws[0], pos_tags)
+
+        measure = scorer.Scorer()
+        golden_seq = instance.raw_seq[0]
+        gold_tree = parser.create_from_bracket_string(golden_seq)
+        converted_tree = parser.create_from_bracket_string(converted_seq)
+        ret = measure.score_trees(gold_tree, converted_tree)
+        match_num = ret.matched_brackets
+        gold_num = ret.gold_brackets
+        pred_num = ret.test_brackets
+        assert match_num == gold_num
+        assert match_num == pred_num
+
     def unit_test(self):
         self.check_zero_embedding()
         if self.resume_dir:
             self.check_load()
         self.check_grad()
+        self.check_action2treeseq()
         self.logger.info('Finish all unit tests')
 
     def run(self):
@@ -660,9 +666,9 @@ class Trainer(object):
         if self.resume_dir:
             self.load_model(self.resume_dir)
         self.unit_test()
-        # self.inference(self.train_iterator, type_corpus='train', tf_board=True)
         self.training()
-        self.inference(self.test_iterator, type_corpus='test', tf_board=True)
+        self.inference(self.train_iterator, type_corpus='train', tf_board=True)
+        # self.inference(self.test_iterator, type_corpus='test', tf_board=True)
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train RNNG network')
@@ -731,3 +737,19 @@ if __name__ == '__main__':
     # parser.add_argument('--log-interval', type=int, default=100, metavar='NUMBER', help='print logs every this number of iterations (default: 10)')
     # parser.add_argument('--seed', type=int, default=25122017, help='random seed (default: 25122017)')
     # parser.add_argument('--cuda', dest='cuda', help='whether use CUDA', action='store_true')
+
+    # if self.exclude_word_embs:
+    #     self.logger.info('Excluding word embedding from pretrained model')
+    #     pretrained_dict = torch.load(self.resume_file)
+    #     model_dict = self.model.state_dict()
+    #     pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'word_embedding' not in k}
+    #     model_dict.update(pretrained_dict)
+    #     self.model.load_state_dict(model_dict)
+    # else:
+    # pretrained_dict = torch.load(self.resume_file)
+    # model_dict = self.model.state_dict()
+    # exclude_lst = [k for k in pretrained_dict.keys() if pretrained_dict[k].size() != model_dict[k].size()]
+    # pretrained_dict = {k: v for k, v in pretrained_dict.items() if v.size() == model_dict[k].size()}
+    # print('WARNING: Excluding', exclude_lst)
+    # model_dict.update(pretrained_dict)
+    # self.model.load_state_dict(model_dict)

@@ -371,7 +371,6 @@ class DiscRNNG(nn.Module):
                     # push_prod = self.productions[self._get_prod_id(max_action_id)]
                     # self._push_prod(push_prod)
                     self._push_prod(self._get_prod_id(max_action_id))
-
                 else:
                     raise RuntimeError('most probable action is an illegal one')
             self._append_history(max_action_id)
