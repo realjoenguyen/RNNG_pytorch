@@ -375,7 +375,8 @@ class DiscRNNG(nn.Module):
                     self._push_prod(self._get_prod_id(max_action_id))
                 else:
                     print('Raw seq:', instance.raw_seq[0])
-                    print('ERROR: push NP is an illegal one\n')
+                    pred_prod = self.productions[self._get_prod_id(max_action_id)].data
+                    print('ERROR: push', str(pred_prod), 'is an illegal one\n')
                     break
             self._append_history(max_action_id)
         return list(self._history), self._stack[0].subtree
