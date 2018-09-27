@@ -124,7 +124,7 @@ class Trainer(object):
         self.resume_dir = resume_dir
         self.optimizer_type = optimizer
         self.train_corpus = train_corpus
-        self.exclude_word_embs = exclude_word_emb
+        self.exclude_word_emb = exclude_word_emb
         self.dev_corpus = dev_corpus
         self.rnng_type = rnng_type
         self.lower = lower
@@ -233,7 +233,7 @@ class Trainer(object):
             ('raws', self.RAWS),
         ]
 
-    def process_each_corpus(self, corpus, name=None, shuffle=True):
+    def process_each_corpus(self, corpus: str, name: str, shuffle=True):
         assert corpus is not None
         dataset = self.make_dataset(corpus, name)
         iterator = Iterator(dataset,
@@ -243,6 +243,15 @@ class Trainer(object):
                             repeat=False)
         return dataset, iterator
 
+    def get_singletons(self):
+        self.cached_singleton_file = os.path.join(self.save_to, 'singletons.pkl')
+        if self.use_cache:
+            self.logger.info('Loading self.singleton from ' + self.cached_singleton_file)
+            self.singletons = torch.load(self.cached_singleton_file)
+        else:
+            self.logger.info('Dumping cached self.singleton into ' + self.cached_singleton_file)
+            torch.save(self.singletons, self.cached_singleton_file)
+
     def process_corpora(self) -> None:
         self.train_dataset, self.train_iterator = self.process_each_corpus(self.train_corpus, 'train', shuffle=True)
         self.logger.info('Len of train = ' + str(len(self.train_iterator)))
@@ -251,11 +260,13 @@ class Trainer(object):
             self.dev_dataset, self.dev_iterator = self.process_each_corpus(self.dev_corpus, 'dev', shuffle=False)
             self.logger.info('Len of dev = ' + str(len(self.dev_iterator)))
 
+        self.get_singletons()
+
         if self.test_corpus:
             self.test_dataset, self.test_iterator = self.process_each_corpus(self.test_corpus, 'test', shuffle=False)
             self.logger.info('Len of test = ' + str(len(self.test_iterator)))
 
-    def build_vocabularies(self) -> None:
+    def build_vocab(self) -> None:
         def extend_vocab(field, word_lst, using_vector=False):
             cnt_add_w = 0
             for w in word_lst:
@@ -264,7 +275,7 @@ class Trainer(object):
                     field.vocab.itos.append(w)
                     field.vocab.stoi[w] = len(field.vocab.itos) - 1
                 # else:
-                # self.logger.warning(w + ' is already in the field')
+                #     self.logger.warning(w + ' is already in the field')
             if using_vector:
                 # self.logger.info('Add ' + str(cnt_add_w) + ' zero vectors into vocab.vectors')
                 field.vocab.vectors = torch.cat((field.vocab.vectors,
@@ -275,7 +286,15 @@ class Trainer(object):
         pretrained_vec = vocab.Vectors(os.path.basename(self.pretrained_emb_path),
                                        os.path.dirname(self.pretrained_emb_path))
         self.WORDS.build_vocab(self.train_dataset, min_freq=self.min_freq, vectors=pretrained_vec)
+        assert len(self.singletons) > 0
+        self.logger.info('Len singleton = ' + str(len(self.singletons)))
         extend_vocab(self.WORDS, self.singletons, using_vector=True)
+
+        #print vocab to file
+        f_write = open(os.path.join(self.save_to, 'vocab.txt'), 'w')
+        for w in self.WORDS.vocab.itos:
+            f_write.write(w + '\n')
+
         cnt_zero = 0
         zero_words = []
 
@@ -288,7 +307,7 @@ class Trainer(object):
                 zero_words.append(cur_word)
 
         self.logger.info('There are ' + str(cnt_zero) + ' zero embeddings')
-        # print('Zero words = ', zero_words)
+        print('Zero words = ', zero_words[-25:] + zero_words[:25])
         assert cnt_zero > 1
 
         self.POS_TAGS.build_vocab(self.train_dataset)
@@ -352,7 +371,7 @@ class Trainer(object):
             else:
                 return '<unk>'
 
-    def make_oracles(self, corpus: str):
+    def make_oracles(self, corpus: str, name: str):
         oracles = []
         f = open(corpus, 'r')
         line = f.readline()
@@ -374,13 +393,15 @@ class Trainer(object):
                 if raw_token == '<unk>':
                     raw_token_lst[id] = unk_lst[id]
 
-            # find all unk types
-            for id, w in enumerate(raw_token_lst):
-                if unk_lst[id].startswith('unk'):
-                    if unk_lst[id] == 'unk-num':  # doesn't replace unk-num with number
-                        continue
-                    if not w.startswith('unk'):
-                        self.singletons.add(self.preprocess_token(w, pos_tag_str.split()[id]))
+            # add singleton into self.singleton
+            if name == 'train' or name == 'dev':
+                for id, w in enumerate(raw_token_lst):
+                    if unk_lst[id].startswith('unk'):
+                        if unk_lst[id] == 'unk-num':  # doesn't replace unk-num with number
+                            continue
+                        if not w.startswith('unk'):
+                            added_singleton = self.preprocess_token(w, pos_tag_str.split()[id])
+                            self.singletons.add(added_singleton)
 
             # get action seqs
             actions = []
@@ -392,10 +413,6 @@ class Trainer(object):
                 actions.append(line)
 
             oracles.append(DiscOracle(raw_seq, actions, pos_tag_str.split(), unk_lst, raw_token_lst))
-            # if training:
-            #     if raw_token_lst != unk_lst:
-            #         oracles.append(DiscOracle(actions, pos_tag.split(), raw_token_lst, raw_token_lst, False))
-
             line = f.readline()
             while line == '\n': line = f.readline()
         return oracles
@@ -408,7 +425,7 @@ class Trainer(object):
             oracles = torch.load(cached_corpus)
         else:
             self.logger.info('Reading from %s', corpus)
-            oracles = self.make_oracles(corpus)
+            oracles = self.make_oracles(corpus, name)
             self.logger.info('Dumping cached corpus to ' + cached_corpus)
             torch.save(oracles, cached_corpus)
 
@@ -498,9 +515,9 @@ class Trainer(object):
                                 if random.random() > 0.5:
                                     unk_words[id] = self.WORDS.vocab.stoi[singleton]
                                     cnt_change += 1
-                                    # self.logger.info('Change from ' + cur_unk_word + ' into ' + singleton_word)
+                                    # self.logger.info('Change from ' + cur_unk_word + ' into ' + singleton)
 
-                self.log_logits, self.pred_action_ids = self.model.forward(unk_words, pos_tags, actions)
+                self.log_logits, self.pred_action_ids = self.model.forward(instance, unk_words, pos_tags, actions)
                 self.training_loss = self.losser(self.log_logits, instance.actions.view(-1))
                 assert not torch.isinf(self.training_loss)
                 assert not torch.isnan(self.training_loss)
@@ -565,7 +582,7 @@ class Trainer(object):
         self.model.eval()
         with torch.no_grad():
             for instance in iterator:
-                self.pred_action_ids, _ = self.model.decode(instance.words, instance.pos_tags)
+                self.pred_action_ids, _ = self.model.decode(instance)
                 metric = self.get_eval_metrics(instance, self.pred_action_ids)
                 infer_meter.update(metric)
         return infer_meter
@@ -588,14 +605,24 @@ class Trainer(object):
         assert len(self.resume_file_lst) == 1
         self.resume_file = self.resume_file_lst[0]
         self.logger.info('Loading model from ' + str(self.resume_file))
-        self.model.load_state_dict(torch.load(self.resume_file))
+
+        if self.exclude_word_emb:
+            self.logger.info('Excluding word embedding from pretrained model')
+            pretrained_dict = torch.load(self.resume_file)
+            model_dict = self.model.state_dict()
+            pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'word_embedding' not in k}
+            model_dict.update(pretrained_dict)
+            self.model.load_state_dict(model_dict)
+        else:
+            self.model.load_state_dict(torch.load(self.resume_file))
         self.logger.info('Done loading.')
 
     def check_grad(self):
         self.model.train()
         instance = next(iter(self.train_iterator))
         self.model.zero_grad()
-        self.log_logits, self.pred_action_ids = self.model.forward(instance.words.view(-1),
+        self.log_logits, self.pred_action_ids = self.model.forward(instance,
+                                                                   instance.words.view(-1),
                                                                    instance.pos_tags.view(-1),
                                                                    instance.actions.view(-1))
 
@@ -661,17 +688,16 @@ class Trainer(object):
         self.get_grammar()
         self.init_fields()
         self.process_corpora()
-        self.build_vocabularies()
+        self.build_vocab()
         self.build_model()
         self.build_optimizer()
         self.old_paras = copy.deepcopy(list(self.model.parameters()))
         if self.resume_dir:
             self.load_model(self.resume_dir)
         self.unit_test()
+        self.inference(self.dev_iterator, type_corpus='dev', tf_board=True)
         self.training()
-        # self.inference(self.train_iterator, type_corpus='train', tf_board=True)
         self.inference(self.test_iterator, type_corpus='test', tf_board=True)
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train RNNG network')

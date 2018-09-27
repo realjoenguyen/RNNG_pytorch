@@ -34,6 +34,11 @@ class Oracle(metaclass=abc.ABCMeta):
     def raws(self) -> List[Word]:
         pass
 
+    @property
+    @abc.abstractmethod
+    def raw_seq(self) -> str:
+        pass
+
     # @property
     # @abc.abstractmethod
     # def check_unk(self):
@@ -92,7 +97,7 @@ class Oracle(metaclass=abc.ABCMeta):
 
 class DiscOracle(Oracle):
     def __init__(self,
-                 # raw: str,
+                 raw_seq: str,
                  actions: Sequence[Action],
                  pos_tags: Sequence[POSTag],
                  words: Sequence[Word],
@@ -117,6 +122,7 @@ class DiscOracle(Oracle):
         self._words = words
         # self._check_unk = check_unk
         self._raws = raws
+        self._raw_seq = raw_seq
         # self._unks = raws
 
     # @property
@@ -138,6 +144,10 @@ class DiscOracle(Oracle):
     @property
     def raws(self) -> List[Word]:
         return list(self._raws)
+
+    @property
+    def raw_seq(self) -> str:
+        return self._raw_seq
 
     # @property
     # def check_unk(self):

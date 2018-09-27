@@ -29,6 +29,7 @@ EarlyElement = NamedTuple('EarlyElement', [('production', Production),
                                            ('next_open_nt_id', int),
                                            ])
 
+
 class EmptyStackError(Exception):
     def __init__(self):
         super().__init__('stack is already empty')
@@ -121,11 +122,14 @@ def log_softmax(inputs: Variable, restrictions: Optional[torch.LongTensor] = Non
         -float('inf')))
     return F.log_softmax(inputs + addend)
 
+
 def is_scan_prod(prod: Production) -> bool:
     # return [str(e) for e in prod.rhs()] == ['<w>']
     return prod.rhs == ['<w>']
 
+
 import torchtext
+
 
 class DiscRNNG(nn.Module):
     MAX_OPEN_NP = 100
@@ -247,9 +251,8 @@ class DiscRNNG(nn.Module):
 
     def next_early_open_nt(self) -> str:
         assert len(self._early_stack) > 0
-        top = self._early_stack[-1] #type: EarlyElement
+        top = self._early_stack[-1]  # type: EarlyElement
         assert top.next_open_nt_id < len(top.production.data)
-        # return str(top.production.rhs()[top.next_open_nt_id])
         return top.production.rhs[top.next_open_nt_id]
 
     @property
@@ -298,10 +301,12 @@ class DiscRNNG(nn.Module):
             init.constant_(guard, 0.)
 
     def forward(self,
+                instance: torchtext.data.Batch,
                 words: torch.Tensor,
                 pos_tags: torch.Tensor,
                 actions: torch.Tensor):
 
+        self.instance = instance
         assert words.dim() == 1
         assert words.size() == pos_tags.size()
         assert actions.dim() == 1
@@ -314,8 +319,6 @@ class DiscRNNG(nn.Module):
             assert len(self.stack_encoder) == len(self._stack) + 1
             log_probs = self._compute_action_log_probs()
             llh.append(log_probs)
-            # _, index = torch.max(log_probs, dim=0)
-            # llh += log_probs[action]
             max_action_id = torch.max(log_probs, dim=0)[1].item()
             predicted_actions.append(max_action_id)
 
@@ -334,10 +337,7 @@ class DiscRNNG(nn.Module):
                     break
             else:
                 if self._check_push_np():
-                    # self._push_nt(self._get_nt(action_id))
                     # start = timer()
-                    # push_prod = self.productions[self._get_prod_id(action_id)]
-                    # self._push_prod(push_prod)
                     self._push_prod(self._get_prod_id(action_id))
                     # print ('push = ', timer() - start)
                 else:
@@ -347,9 +347,10 @@ class DiscRNNG(nn.Module):
         llh = torch.stack(llh, dim=0)
         return llh, predicted_actions
 
-    def decode(self, words: Variable, pos_tags: Variable) -> Tuple[List[ActionId], Tree]:
-        words = words.view(-1)
-        pos_tags = pos_tags.view(-1)
+    def decode(self, instance: torchtext.data.Batch) -> Tuple[List[ActionId], Tree]:
+        self.instance = instance
+        words = instance.words.view(-1)
+        pos_tags = instance.pos_tags.view(-1)
 
         self._start(words, pos_tags)
         while not self.finished:
@@ -359,20 +360,23 @@ class DiscRNNG(nn.Module):
                 if self._check_shift():
                     self._shift()
                 else:
-                    raise RuntimeError('most probable action is an illegal one')
+                    print('Raw seq:', instance.raw_seq[0])
+                    print('ERROR: shift is an illegal one\n')
+                    break
             elif max_action_id == self.REDUCE_ID:
                 if self._check_reduce():
                     self._reduce()
                 else:
-                    raise RuntimeError('most probable action is an illegal one')
+                    print('Raw seq:', instance.raw_seq[0])
+                    print('ERROR: reduce is an illegal one\n')
+                    break
             else:
                 if self._check_push_np():
-                    # self._push_nt(self._get_nt(max_action_id))
-                    # push_prod = self.productions[self._get_prod_id(max_action_id)]
-                    # self._push_prod(push_prod)
                     self._push_prod(self._get_prod_id(max_action_id))
                 else:
-                    raise RuntimeError('most probable action is an illegal one')
+                    print('Raw seq:', instance.raw_seq[0])
+                    print('ERROR: push NP is an illegal one\n')
+                    break
             self._append_history(max_action_id)
         return list(self._history), self._stack[0].subtree
 
@@ -485,8 +489,17 @@ class DiscRNNG(nn.Module):
 
     def _check_reduce(self) -> bool:
         tos_is_open_np = len(self._stack) > 0 and self._stack[-1].is_open_np
-        return self._num_open_np > 0 and not tos_is_open_np \
-               and not (self._num_open_np < 2 and len(self._buffer) > 0) and len(self._stack) > 0
+        old_cond = self._num_open_np > 0 and not tos_is_open_np \
+                   and not (self._num_open_np < 2 and len(self._buffer) > 0) and len(self._stack) > 0
+
+        # reduce only top early is NT -> * w or S -> A B *
+        # for example REDUCE (S -> A * B) is illegal
+        if len(self._early_stack) > 0:
+            top = self._early_stack[-1]  # type: EarlyElement
+            early_cond = is_scan_prod(top.production) or top.next_open_nt_id == len(top.production.data)
+            return old_cond and early_cond
+        else:
+            return False
 
     def _append_history(self, action_id: ActionId) -> None:
         assert action_id in self._action_emb
@@ -539,7 +552,7 @@ class DiscRNNG(nn.Module):
     def _reduce(self) -> None:
         assert self._check_reduce()
 
-        children = [] #type: StackElement
+        children = []  # type: StackElement
         while len(self._stack) > 0 and not self._stack[-1].is_open_np:
             children.append(self._stack.pop())
             self.stack_encoder.pop()
@@ -555,8 +568,6 @@ class DiscRNNG(nn.Module):
         # check if chilren label match with rhs of rule in open_nt
         # if open_np.production != None:
         if not is_scan_prod(open_np.production):
-            # rhs_nt = [str(e) for e in open_np.production.rhs()]
-            # label_children = [str(e.lhs()) for e in child_prod if e != 'token']
             rhs_nt = open_np.production.rhs
             label_children = [e.lhs for e in child_prod if type(e) == Production]
             assert rhs_nt == label_children
