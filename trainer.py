@@ -208,6 +208,7 @@ class Trainer(object):
             json.dump(self.attributes_dict, fp)
         self.saved_model_dir = os.path.join(self.save_to, 'saved_model')
         os.makedirs(self.saved_model_dir, exist_ok=True)
+        self.logger.info('START A NEW PROCESS!')
 
         # tensorboard
         self.tf_log_path = os.path.join(self.save_to, 'tf_log')
@@ -695,7 +696,7 @@ class Trainer(object):
         if self.resume_dir:
             self.load_model(self.resume_dir)
         self.unit_test()
-        self.inference(self.dev_iterator, type_corpus='dev', tf_board=True)
+        # self.inference(self.dev_iterator, type_corpus='dev', tf_board=True)
         self.training()
         self.inference(self.test_iterator, type_corpus='test', tf_board=True)
 
