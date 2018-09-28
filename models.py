@@ -377,6 +377,7 @@ class DiscRNNG(nn.Module):
                     print('Raw seq:', instance.raw_seq[0])
                     pred_prod = self.productions[self._get_prod_id(max_action_id)].data
                     print('ERROR: push', str(pred_prod), 'is an illegal one\n')
+                    print(len(self._buffer))
                     break
             self._append_history(max_action_id)
         return list(self._history), self._stack[0].subtree
@@ -473,6 +474,8 @@ class DiscRNNG(nn.Module):
         return len(self._buffer) > 0 and self._num_open_np < self.MAX_OPEN_NP
 
     def _check_push_pred_np(self, action_id: int) -> bool:
+        if not self._check_push_np():
+            return False
         pushed_prod = self.productions[self._get_prod_id(action_id)]
         if len(self._early_stack) > 0:
             top_early = self._early_stack[-1]
