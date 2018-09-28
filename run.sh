@@ -20,11 +20,13 @@ SAVE_TO=./res/
 python3.5 ./trainer.py \
 --cuda \
 --max_epochs 1000 --id 0 \
---use_cache --train_corpus ./data/oracle_rule/train_rule.oracle \
---lemma --save_to ./res/ --emb_path /home/anh/embedding/ --emb_type glove --word_embedding_size 100 \
+--train_corpus ./data/oracle_rule/train_rule.oracle \
+--use_cache --lemma --save_to ./res/ --emb_path /home/anh/embedding/ --emb_type glove --word_embedding_size 100 \
 --train_grammar_file ./data/train_grammar.txt \
 --dev_corpus ./data/oracle_rule/dev_rule.oracle --test_corpus ./data/oracle_rule/test_rule.oracle \
---learning_rate 0.001 --clip 10 --optimizer adam
+--learning_rate 0.001 --clip 10 --optimizer adam \
+--exclude_word_emb \
+--resume_dir './res/id=0;optimizer=adam;unk=True;emb_type=glove;lemma=True;lr=0.0010;word=100;clip=10.0/saved_model/'
 
 #--use-cache --exclude_word_embs \
 #--lemma \

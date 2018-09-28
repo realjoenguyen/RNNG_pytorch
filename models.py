@@ -474,8 +474,11 @@ class DiscRNNG(nn.Module):
         return len(self._buffer) > 0 and self._num_open_np < self.MAX_OPEN_NP
 
     def _check_push_pred_np(self, action_id: int) -> bool:
+        # old condition
         if not self._check_push_np():
             return False
+
+        # early condition
         pushed_prod = self.productions[self._get_prod_id(action_id)]
         if len(self._early_stack) > 0:
             top_early = self._early_stack[-1]
