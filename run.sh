@@ -18,11 +18,12 @@ SAVE_TO=./res/
 #rm -rf ${SAVE_TO}/*
 
 python3.5 ./trainer.py \
+--rule_emb \
 --cuda \
 --debug_mode \
---max_epochs 1000 --id 2 \
+--max_epochs 1000 --id 3 \
 --train_corpus ./data/oracle_rule/train_rule.oracle \
---exclude_word_emb --use_cache --lemma --save_to ./res/ --emb_path /home/anh/embedding/ --emb_type glove --word_embedding_size 100 \
+--use_cache --lemma --save_to ./res/ --emb_path /home/anh/embedding/ --emb_type glove --word_embedding_size 100 \
 --train_grammar_file ./data/train_grammar.txt \
 --dev_corpus ./data/oracle_rule/dev_rule.oracle --test_corpus ./data/oracle_rule/test_rule.oracle \
 --learning_rate 0.001 --clip 10 --optimizer adam \
