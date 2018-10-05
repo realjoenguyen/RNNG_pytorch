@@ -3,7 +3,7 @@ from timeit import default_timer as timer
 import nltk
 from typing import List, NamedTuple, Optional, Sequence, Sized, Tuple, Union, cast
 from typing import Dict  # noqa
-
+import torchtext
 from nltk.tree import Tree
 from torch.autograd import Variable
 import torch
@@ -13,11 +13,6 @@ import torch.nn.init as init
 
 from self_typing import WordId, NTId, ActionId
 from production import Production
-
-# Production = NamedTuple('Production', [('production', nltk.grammar.Production),
-#                                        ('lhs', str),
-#                                        ('rhs', List[str]),
-#                                        ])
 
 StackElement = NamedTuple('StackElement', [('subtree', Union[WordId, Tree]),
                                            ('production', Union[Production, str]),
@@ -124,11 +119,7 @@ def log_softmax(inputs: Variable, restrictions: Optional[torch.LongTensor] = Non
 
 
 def is_scan_prod(prod: Production) -> bool:
-    # return [str(e) for e in prod.rhs()] == ['<w>']
     return prod.rhs == ['<w>']
-
-
-import torchtext
 
 
 class DiscRNNG(nn.Module):
@@ -165,7 +156,7 @@ class DiscRNNG(nn.Module):
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.dropout = dropout
-        self.productions = productions
+        self.productions = productions  # type: List[Production]
         self.NONTERMS = nonterms
         self.WORDS = words
 
@@ -175,6 +166,7 @@ class DiscRNNG(nn.Module):
         self._history = []  # type: List[ActionId]
         self._early_stack = []  # type: List[EarlyElement]
         self._num_open_np = 0
+        self._num_empty_nt = 0
 
         # Embeddings
         self.word_embedding = nn.Embedding(self.num_words, self.word_embedding_size)
@@ -213,6 +205,16 @@ class DiscRNNG(nn.Module):
                                     num_layers=self.num_layers,
                                     dropout=self.dropout)
 
+        # Rule compositon
+        self.rule_fwd_composer = nn.LSTM(self.input_size,
+                                         self.input_size,
+                                         num_layers=self.num_layers,
+                                         dropout=self.dropout)
+        self.rule_bwd_composer = nn.LSTM(self.input_size,
+                                         self.input_size,
+                                         num_layers=self.num_layers,
+                                         dropout=self.dropout)
+
         # Transformations
         self.word2encoder = nn.Sequential(
             nn.Linear(self.word_embedding_size + self.pos_embedding_size, self.hidden_size),
@@ -228,6 +230,11 @@ class DiscRNNG(nn.Module):
             nn.ReLU(),
         )
         self.fwdbwd2composed = nn.Sequential(
+            nn.Linear(2 * self.input_size, self.input_size),
+            nn.ReLU(),
+        )
+        # rule
+        self.rule_fwdbwd2composed = nn.Sequential(
             nn.Linear(2 * self.input_size, self.input_size),
             nn.ReLU(),
         )
@@ -248,6 +255,25 @@ class DiscRNNG(nn.Module):
     @property
     def num_actions(self) -> int:
         return len(self.productions) + 2
+
+    # @property
+    # def _num_empty_nt(self) -> int:
+    #     res = 0
+    #     if len(self._early_stack) > 0:
+    #         for id, e in enumerate(self._early_stack):
+    #             if is_scan_prod(e.production):
+    #                 assert id == len(self._early_stack) - 1
+    #                 if self._history[-1] == 2 + self.productions.index(e.production): # if the last action is NP -> *<w>
+    #                     res += 1
+    #             else:
+    #                 if id == len(self._early_stack) - 1:
+    #                     res += len(e.production.rhs) - e.next_open_nt_id
+    #                 else:
+    #                     if len(e.production.rhs) - e.next_open_nt_id - 1 > 0:
+    #                         res += len(e.production.rhs) - e.next_open_nt_id - 1
+    #         return res
+    #     else:
+    #         return 0
 
     def next_early_open_nt(self) -> str:
         assert len(self._early_stack) > 0
@@ -272,7 +298,7 @@ class DiscRNNG(nn.Module):
             encoder.reset_parameters()
 
         # Compositions
-        for name in 'fwd bwd'.split():
+        for name in 'fwd bwd rule_fwd rule_bwd'.split():
             lstm = getattr(self, '{}_composer'.format(name))
             for pname, pval in lstm.named_parameters():
                 if pname.startswith('weight'):
@@ -290,6 +316,9 @@ class DiscRNNG(nn.Module):
 
         init.xavier_uniform_(self.fwdbwd2composed[0].weight, gain=gain)
         init.constant_(self.fwdbwd2composed[0].bias, 1.)
+        init.xavier_uniform_(self.rule_fwdbwd2composed[0].weight, gain=gain)
+        init.constant_(self.rule_fwdbwd2composed[0].bias, 1.)
+
         init.xavier_uniform_(self.encoders2summary[1].weight, gain=gain)
         init.constant_(self.encoders2summary[1].bias, 1.)
         init.xavier_uniform_(self.summary2actionlogprobs.weight)
@@ -318,6 +347,7 @@ class DiscRNNG(nn.Module):
         for action in actions:
             assert len(self.stack_encoder) == len(self._stack) + 1
             log_probs = self._compute_action_log_probs()
+            assert all(torch.isnan(log_probs)) is False
             llh.append(log_probs)
             max_action_id = torch.max(log_probs, dim=0)[1].item()
             predicted_actions.append(max_action_id)
@@ -325,7 +355,9 @@ class DiscRNNG(nn.Module):
             action_id = action.item()
             if action_id == self.SHIFT_ID:
                 if self._check_shift():
+                    # start = timer()
                     self._shift()
+                    # print ('shift = ', timer() - start)
                 else:
                     break
             elif action_id == self.REDUCE_ID:
@@ -333,13 +365,16 @@ class DiscRNNG(nn.Module):
                     # start = timer()
                     self._reduce()
                     # print ('reduce = ', timer() - start)
+                    # print ('')
                 else:
                     break
             else:
-                if self._check_push_np():
+                prod_id = self._get_prod_id(action_id)
+                if self._check_push_pred_np(prod_id):
                     # start = timer()
-                    self._push_prod(self._get_prod_id(action_id))
+                    self._push_prod(prod_id)
                     # print ('push = ', timer() - start)
+                    # print ('')
                 else:
                     break
             self._append_history(action_id)
@@ -355,29 +390,35 @@ class DiscRNNG(nn.Module):
         self._start(words, pos_tags)
         while not self.finished:
             log_probs = self._compute_action_log_probs()
+            assert all(torch.isnan(log_probs)) is False
             max_action_id = torch.max(log_probs, dim=0)[1].item()
             if max_action_id == self.SHIFT_ID:
                 if self._check_shift():
                     self._shift()
                 else:
                     print('Raw seq:', instance.raw_seq[0])
-                    print('ERROR: shift is an illegal one\n')
+                    print('ERROR: shift is an illegal one')
+                    print('')
                     break
             elif max_action_id == self.REDUCE_ID:
                 if self._check_reduce():
                     self._reduce()
                 else:
                     print('Raw seq:', instance.raw_seq[0])
-                    print('ERROR: reduce is an illegal one\n')
+                    print('ERROR: reduce is an illegal one')
+                    # self._check_reduce(debug=True)
+                    print('')
                     break
             else:
-                if self._check_push_np():
-                    self._push_prod(self._get_prod_id(max_action_id))
+                prod_id = self._get_prod_id(max_action_id)
+                if self._check_push_pred_np(prod_id):
+                    self._push_prod(prod_id)
                 else:
                     print('Raw seq:', instance.raw_seq[0])
                     pred_prod = self.productions[self._get_prod_id(max_action_id)].data
-                    print('ERROR: push', str(pred_prod), 'is an illegal one\n')
-                    print(len(self._buffer))
+                    print('ERROR: push', str(pred_prod), 'is an illegal one')
+                    print('')
+                    # print(len(self._buffer))
                     break
             self._append_history(max_action_id)
         return list(self._history), self._stack[0].subtree
@@ -470,63 +511,81 @@ class DiscRNNG(nn.Module):
             restrictions=illegal_actions
         ).view(-1)
 
-    def _check_push_np(self) -> bool:
-        return len(self._buffer) > 0 and self._num_open_np < self.MAX_OPEN_NP
-
-    def _check_push_pred_np(self, action_id: int) -> bool:
+    def _check_push_pred_np(self, prod_id: int) -> bool:
         # old condition
-        if not self._check_push_np():
+        old_condi = len(self._buffer) > 0 and self._num_open_np < self.MAX_OPEN_NP
+        if not old_condi:
+            return False
+
+        pred_prod = self.productions[prod_id]  # type: Production
+        # num of rhs of production <= num of left words in buffer
+        if len(pred_prod.rhs) > len(self._buffer):
+            return False
+        # num of rhs of production + self.num_open_nt <= # of left words in buffer
+        if len(pred_prod.rhs) + self._num_empty_nt - 1 > len(self._buffer):
             return False
 
         # early condition
-        pushed_prod = self.productions[self._get_prod_id(action_id)]
         if len(self._early_stack) > 0:
             top_early = self._early_stack[-1]
             if top_early.next_open_nt_id >= len(top_early.production.data):
-                # done all NT in rule
+                # done all NT in rule -> must reduce or shift
                 return False
+
             # next predicted lhs of rule must == next open nt in early stack
-            return pushed_prod.lhs == self.next_early_open_nt()
+            if pred_prod.lhs != self.next_early_open_nt():
+                return False
+
+            # if maximum available open_np (self.MAX_OPEN_NP - self._num_open_np) == self._num_empty_nt, must be NT -> <w>
+            # because we have to scan token in all left empty nt
+            if self.MAX_OPEN_NP - self._num_open_np == self._num_empty_nt:
+                if not is_scan_prod(pred_prod):
+                    return False
+
+            return True
         else:
             # first rule must be TOP -> sth
-            return pushed_prod.lhs == 'TOP'
+            return pred_prod.lhs == 'TOP'
 
     def _check_shift(self) -> bool:
-        return len(self._buffer) > 0 and self._num_open_np > 0 and len(self._stack) > 0
+        old_condi = len(self._buffer) > 0 and self._num_open_np > 0 and len(self._stack) > 0
+        # left buffer token must >= num_empty_nt
+        if len(self._early_stack) > 0:
+            if self._history[-1] > 1 and is_scan_prod(self.productions[self._get_prod_id(self._history[-1])]):
+                new_condi = len(self._buffer) >= self._num_empty_nt
+            else:
+                new_condi = len(self._buffer) - 1 >= self._num_empty_nt
+            return old_condi and new_condi
+        else:
+            return old_condi
 
-    def _check_reduce(self) -> bool:
+    def _check_reduce(self, debug=False) -> bool:
         tos_is_open_np = len(self._stack) > 0 and self._stack[-1].is_open_np
         old_cond = self._num_open_np > 0 and not tos_is_open_np \
                    and not (self._num_open_np < 2 and len(self._buffer) > 0) and len(self._stack) > 0
+        if debug:
+            print('old_cond =', old_cond)
+            print(len(self._early_stack))
 
         # reduce only top early is NT -> * w or S -> A B *
         # for example REDUCE (S -> A * B) is illegal
         if len(self._early_stack) > 0:
             top = self._early_stack[-1]  # type: EarlyElement
             early_cond = is_scan_prod(top.production) or top.next_open_nt_id == len(top.production.data)
+            if debug:
+                print(top.production, top.next_open_nt_id, len(top.production.data))
+                print('early_cond=', is_scan_prod(top.production), top.next_open_nt_id == len(top.production.data))
             return old_cond and early_cond
         else:
             return False
 
     def _append_history(self, action_id: ActionId) -> None:
         assert action_id in self._action_emb
-
         self._history.append(action_id)
         self.history_encoder.push(self._action_emb[action_id])
 
-    # def _push_nt(self, nt_id: NTId) -> None:
-    #     assert self._check_push_nt()
-    #     assert nt_id in self._nt_emb
-    #
-    #     self._stack.append(StackElement(Tree(nt_id, []), self._nt_emb[nt_id], True))
-    #     self.stack_encoder.push(self._nt_emb[nt_id])
-    #     self._num_open_nt += 1
-
     def _push_prod(self, prod_id: int):
-        assert self._check_push_np()
-
-        # lhs_nt_id = self.NONTERMS.vocab.stoi[str(cur_prod.lhs())]
-        # rhs_nt_ids = [self.NONTERMS.vocab.stoi[str(nt)] for nt in cur_prod.rhs()]
+        # assert self._check_push_pred_np(prod_id)
 
         cur_prod = self.productions[prod_id]
         lhs_nt_id = self.NONTERMS.vocab.stoi[cur_prod.lhs]
@@ -534,19 +593,24 @@ class DiscRNNG(nn.Module):
 
         lhs_emb = self._nt_emb[lhs_nt_id]
         rhs_embs = [self._nt_emb[rhs_nt_id] for rhs_nt_id in rhs_nt_ids]
-        composed_emb = self._compose(lhs_emb, rhs_embs)
+        # start = timer()
+        composed_emb = self._compose(lhs_emb, rhs_embs, rule=True)
+        # print (timer() - start)
 
-        # self._stack.append(StackElement(Tree(lhs_nt_id, rhs_nt_ids), composed_emb, True))
-        # self._stack.append(StackElement(cur_prod, composed_emb, True))
         self._stack.append(StackElement(Tree(lhs_nt_id, []), cur_prod, True, composed_emb))
         self.stack_encoder.push(composed_emb)
         self._num_open_np += 1
 
         # early_stack
+        if len(self._early_stack) > 0:
+            if not is_scan_prod(cur_prod):
+                self._num_empty_nt += len(cur_prod.rhs) - 1
+        else:
+            self._num_empty_nt += len(cur_prod.rhs)
         self._early_stack.append(EarlyElement(cur_prod, 0))
 
     def _shift(self) -> None:
-        assert self._check_shift()
+        # assert self._check_shift()
         assert len(self._buffer) > 0
         assert len(self.buffer_encoder) > 0
         assert self._buffer[-1] in self._word_emb
@@ -556,8 +620,14 @@ class DiscRNNG(nn.Module):
         self._stack.append(StackElement(word_id, self.WORDS.vocab.itos[word_id], False, self._word_emb[word_id], ))
         self.stack_encoder.push(self._word_emb[word_id])
 
+        # if last action : NT -> <w> then shift token -> NT is not empty
+        last_action_id = self._history[-1]
+        if last_action_id > 1:
+            if is_scan_prod(self.productions[self._get_prod_id(last_action_id)]):
+                self._num_empty_nt -= 1
+
     def _reduce(self) -> None:
-        assert self._check_reduce()
+        # assert self._check_reduce()
 
         children = []  # type: StackElement
         while len(self._stack) > 0 and not self._stack[-1].is_open_np:
@@ -582,7 +652,9 @@ class DiscRNNG(nn.Module):
         assert isinstance(open_np.subtree, Tree)
         parent_subtree = cast(Tree, open_np.subtree)
         parent_subtree.extend(child_subtrees)
+        # start = timer()
         composed_emb = self._compose(open_np.emb, child_embs)
+        # print (timer() - start)
         self._stack.append(StackElement(parent_subtree, open_np.production, False, composed_emb))
         self.stack_encoder.push(composed_emb)
 
@@ -594,15 +666,19 @@ class DiscRNNG(nn.Module):
         self._early_stack[-1] = EarlyElement(top_early.production, top_early.next_open_nt_id + 1)
         top_early = self._early_stack[-1]
 
-        # NT -> w *
+        # NT -> w * or NT -> A B *
         if is_scan_prod(top_early.production) or top_early.next_open_nt_id > len(top_early.production.data):
             # finish this rule
             self._early_stack.pop()
             if len(self._early_stack) > 0:
                 top_early = self._early_stack[-1]
                 self._early_stack[-1] = EarlyElement(top_early.production, top_early.next_open_nt_id + 1)
+                # # if top_early is NT -> A * B then after reduce we have NT -> A B *
+                # if not is_scan_prod(top_early.production) and len(
+                #         top_early.production.rhs) - top_early.next_open_nt_id >= 0:
+                #     self._num_empty_nt -= 1
 
-    def _compose(self, open_nt_emb: Variable, children_embs: Sequence[torch.Tensor]) -> Variable:
+    def _compose(self, open_nt_emb: Variable, children_embs: Sequence[torch.Tensor], rule=False) -> Variable:
         assert open_nt_emb.size() == (self.input_size,)
         assert all(x.size() == (self.input_size,) for x in children_embs)
 
@@ -616,13 +692,20 @@ class DiscRNNG(nn.Module):
         fwd_input = torch.stack(fwd_input).unsqueeze(1)
         bwd_input = torch.stack(bwd_input).unsqueeze(1)
         # (n_children + 1, 1, input_size)
-        fwd_output, _ = self.fwd_composer(fwd_input)
-        bwd_output, _ = self.bwd_composer(bwd_input)
+        if rule:
+            fwd_output, _ = self.rule_fwd_composer(fwd_input)
+            bwd_output, _ = self.rule_bwd_composer(bwd_input)
+        else:
+            fwd_output, _ = self.fwd_composer(fwd_input)
+            bwd_output, _ = self.bwd_composer(bwd_input)
         # (input_size,)
         fwd_emb = F.dropout(fwd_output[-1][0], p=self.dropout, training=self.training)
         bwd_emb = F.dropout(bwd_output[-1][0], p=self.dropout, training=self.training)
         # (input_size,)
-        return self.fwdbwd2composed(torch.cat([fwd_emb, bwd_emb]).view(1, -1)).view(-1)
+        if rule:
+            return self.rule_fwdbwd2composed(torch.cat([fwd_emb, bwd_emb]).view(1, -1)).view(-1)
+        else:
+            return self.fwdbwd2composed(torch.cat([fwd_emb, bwd_emb]).view(1, -1)).view(-1)
 
     def _get_illegal_actions(self):
         illegal_action_ids = [action_id for action_id in range(self.num_actions) if not self._is_legal(action_id)]
@@ -635,11 +718,7 @@ class DiscRNNG(nn.Module):
             return self._check_shift()
         if action_id == self.REDUCE_ID:
             return self._check_reduce()
-        return self._check_push_pred_np(action_id)
-
-    # def _get_nt(self, action_id: int) -> int:
-    #     assert action_id >= 2
-    #     return action_id - 2
+        return self._check_push_pred_np(self._get_prod_id(action_id))
 
     def _get_prod_id(self, action_id: int) -> int:
         assert action_id >= 2
@@ -647,3 +726,31 @@ class DiscRNNG(nn.Module):
 
     def _new(self, *args, **kwargs) -> torch.FloatTensor:
         return next(self.parameters()).data.new(*args, **kwargs)
+
+# def _push_nt(self, nt_id: NTId) -> None:
+#     assert self._check_push_nt()
+#     assert nt_id in self._nt_emb
+#
+#     self._stack.append(StackElement(Tree(nt_id, []), self._nt_emb[nt_id], True))
+#     self.stack_encoder.push(self._nt_emb[nt_id])
+#     self._num_open_nt += 1
+
+    # @property
+    # def _num_empty_nt(self) -> int:
+    #     res = 0
+    #     if len(self._early_stack) > 0:
+    #         for id, e in enumerate(self._early_stack):
+    #             if is_scan_prod(e.production):
+    #                 assert id == len(self._early_stack) - 1
+    #                 if self._history[-1] == 2 + self.productions.index(e.production): # if the last action is NP -> *<w>
+    #                     res += 1
+    #             else:
+    #                 if id == len(self._early_stack) - 1:
+    #                     res += len(e.production.rhs) - e.next_open_nt_id
+    #                 else:
+    #                     if len(e.production.rhs) - e.next_open_nt_id - 1 > 0:
+    #                         res += len(e.production.rhs) - e.next_open_nt_id - 1
+    #         return res
+    #     else:
+    #         return 0
+
