@@ -88,6 +88,7 @@ class Trainer(object):
                  pos_embedding_size=10,
                  nt_embedding_size=60,
                  action_embedding_size=36,
+                 rule_embedding_size=100,
                  input_size=128,
                  hidden_size=128,
                  num_layers=2,
@@ -99,8 +100,6 @@ class Trainer(object):
                  cuda=False,
                  batch_size=1,
                  clip=10,
-                 # new_corpus=True,
-                 # small_corpus=True,
                  debug_mode=False,
                  use_unk=True,
                  patience=5,
@@ -108,6 +107,7 @@ class Trainer(object):
                  optimizer='adam',
                  exclude_word_emb=False,
                  use_cache=False,
+                 rule_emb=False,
                  cache_path="./cache"):
 
         self.id = id
@@ -116,7 +116,6 @@ class Trainer(object):
         self.use_unk = use_unk
         self.lemma = lemma
         self.emb_type = emb_type
-        # self.new_corpus = new_corpus
         self.clip = clip
         self.test_corpus = test_corpus
         self.cache_path = cache_path
@@ -132,6 +131,7 @@ class Trainer(object):
         self.pos_embedding_size = pos_embedding_size
         self.nt_embedding_size = nt_embedding_size
         self.action_embedding_size = action_embedding_size
+        self.rule_embedding_size = rule_embedding_size
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -142,12 +142,12 @@ class Trainer(object):
         self.seed = seed
         self.log_interval = log_interval
         self.batch_size = batch_size
+        self.rule_emb = rule_emb
         if self.emb_type == 'glove':
             self.pretrained_emb_path = os.path.join(emb_path, 'glove.6B.' + str(self.word_embedding_size) + 'd.txt')
         else:
             self.pretrained_emb_path = os.path.join(emb_path, 'sskip.100.vectors')
         self.attributes_dict = self.__dict__.copy()
-        # print(self.attributes_dict)
         pprint.pprint(self.attributes_dict)
 
         self.singletons = set()
@@ -267,7 +267,7 @@ class Trainer(object):
                     self.singletons.add(added_singleton)
 
     def process_corpora(self):
-        self.train_dataset, self.train_iterator = self.process_each_corpus(self.train_corpus, 'train', shuffle=False)
+        self.train_dataset, self.train_iterator = self.process_each_corpus(self.train_corpus, 'train', shuffle=True)
         self.logger.info('Len of train = ' + str(len(self.train_iterator)))
         if self.dev_corpus:
             self.dev_dataset, self.dev_iterator = self.process_each_corpus(self.dev_corpus, 'dev', shuffle=False)
@@ -343,6 +343,7 @@ class Trainer(object):
             pos_embedding_size=self.pos_embedding_size,
             nt_embedding_size=self.nt_embedding_size,
             action_embedding_size=self.action_embedding_size,
+            rule_embedding_size=self.rule_embedding_size,
             input_size=self.input_size,
             hidden_size=self.hidden_size,
             num_layers=self.num_layers,
@@ -351,7 +352,9 @@ class Trainer(object):
             productions=self.productions,
             nonterms=self.NONTERMS,
             words=self.WORDS,
+            rule_emb=self.rule_emb,
         )
+        self.logger.info('Using rule embedding')
         self.model = DiscRNNG(*model_args, **model_kwargs)
         if self.cuda:
             self.model.cuda()
@@ -631,7 +634,13 @@ class Trainer(object):
                 pretrained_dict['word_embedding.weight'] = pretrained_dict['word_embedding.weight'][:cur_word_emb_size]
             self.model.load_state_dict(pretrained_dict)
         else:
-            self.model.load_state_dict(torch.load(self.resume_file))
+            pretrained_dict = torch.load(self.resume_file)
+            model_dict = self.model.state_dict()
+            pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+            model_dict.update(pretrained_dict)
+            self.model.load_state_dict(model_dict)
+
+            # self.model.load_state_dict(torch.load(self.resume_file))
         self.logger.info('Done loading.')
 
     def check_grad(self):
@@ -654,6 +663,10 @@ class Trainer(object):
 
         for name, para in self.model.named_parameters():
             if (para.grad is None or para.grad.equal(torch.zeros_like(para.grad))) and para.requires_grad:
+                # if just rule emb -> no grad at nt_embedding
+                if self.rule_emb:
+                    if 'rule_fwd_composer' or 'rule_bwd_composer' or 'nt_embedding' in name:
+                        continue
                 raise ValueError('There is no grad at', name)
 
     def check_zero_embedding(self):
@@ -742,6 +755,7 @@ def parse_args():
     parser.add_argument('--resume_dir', type=str, default='')
     parser.add_argument('--exclude_word_emb', action='store_true')
     parser.add_argument('--use_cache', action='store_true')
+    parser.add_argument('--rule_emb', action='store_true')
     parser.add_argument('--optimizer', type=str, default='adam')
     parser.add_argument('--id', type=int, required=True)
     args = parser.parse_args()

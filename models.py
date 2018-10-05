@@ -135,11 +135,13 @@ class DiscRNNG(nn.Module):
                  pos_embedding_size,
                  nt_embedding_size,
                  action_embedding_size,
+                 rule_embedding_size,
                  input_size,
                  hidden_size,
                  num_layers,
                  dropout,
                  pretrained_emb_vec,
+                 rule_emb,
                  productions: List[Production],
                  nonterms: torchtext.data.Field,
                  words: torchtext.data.Field,
@@ -148,10 +150,12 @@ class DiscRNNG(nn.Module):
         self.num_words = num_words
         self.num_pos = num_pos
         self.num_nt = num_nt
+        self.rule_emb = rule_emb
         self.word_embedding_size = word_embedding_size
         self.pos_embedding_size = pos_embedding_size
         self.nt_embedding_size = nt_embedding_size
         self.action_embedding_size = action_embedding_size
+        self.rule_embedding_size = rule_embedding_size
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -175,6 +179,7 @@ class DiscRNNG(nn.Module):
         self.pos_embedding = nn.Embedding(self.num_pos, self.pos_embedding_size)
         self.nt_embedding = nn.Embedding(self.num_nt, self.nt_embedding_size)
         self.action_embedding = nn.Embedding(self.num_actions, self.action_embedding_size)
+        self.rule_embedding = nn.Embedding(self.num_rules, self.rule_embedding_size)
 
         # Parser state encoders
         self.stack_encoder = StackLSTM(self.input_size,
@@ -229,6 +234,10 @@ class DiscRNNG(nn.Module):
             nn.Linear(self.action_embedding_size, self.hidden_size),
             nn.ReLU(),
         )
+        self.rule2encoder = nn.Sequential(
+            nn.Linear(self.rule_embedding_size, self.hidden_size),
+            nn.ReLU(),
+        )
         self.fwdbwd2composed = nn.Sequential(
             nn.Linear(2 * self.input_size, self.input_size),
             nn.ReLU(),
@@ -255,6 +264,10 @@ class DiscRNNG(nn.Module):
     @property
     def num_actions(self) -> int:
         return len(self.productions) + 2
+
+    @property
+    def num_rules(self) -> int:
+        return len(self.productions)
 
     # @property
     # def _num_empty_nt(self) -> int:
@@ -288,7 +301,7 @@ class DiscRNNG(nn.Module):
 
     def reset_parameters(self) -> None:
         # Embeddings
-        for name in 'pos nt action'.split():
+        for name in 'pos nt action rule'.split():
             embedding = getattr(self, '{}_embedding'.format(name))
             embedding.reset_parameters()
 
@@ -586,16 +599,20 @@ class DiscRNNG(nn.Module):
 
     def _push_prod(self, prod_id: int):
         # assert self._check_push_pred_np(prod_id)
-
         cur_prod = self.productions[prod_id]
         lhs_nt_id = self.NONTERMS.vocab.stoi[cur_prod.lhs]
-        rhs_nt_ids = [self.NONTERMS.vocab.stoi[nt] for nt in cur_prod.rhs]
 
-        lhs_emb = self._nt_emb[lhs_nt_id]
-        rhs_embs = [self._nt_emb[rhs_nt_id] for rhs_nt_id in rhs_nt_ids]
-        # start = timer()
-        composed_emb = self._compose(lhs_emb, rhs_embs, rule=True)
-        # print (timer() - start)
+        if self.rule_emb: # use rule embedding
+            lookup_tensor = torch.tensor([prod_id])
+            rule_embedding = self.rule_embedding(lookup_tensor.cuda()).view(-1, self.rule_embedding_size)
+            composed_emb = self.rule2encoder(rule_embedding).view(self.hidden_size)
+        else:
+            rhs_nt_ids = [self.NONTERMS.vocab.stoi[nt] for nt in cur_prod.rhs]
+            lhs_emb = self._nt_emb[lhs_nt_id]
+            rhs_embs = [self._nt_emb[rhs_nt_id] for rhs_nt_id in rhs_nt_ids]
+            # start = timer()
+            composed_emb = self._compose(lhs_emb, rhs_embs, rule=True)
+            # print (timer() - start)
 
         self._stack.append(StackElement(Tree(lhs_nt_id, []), cur_prod, True, composed_emb))
         self.stack_encoder.push(composed_emb)
@@ -735,22 +752,21 @@ class DiscRNNG(nn.Module):
 #     self.stack_encoder.push(self._nt_emb[nt_id])
 #     self._num_open_nt += 1
 
-    # @property
-    # def _num_empty_nt(self) -> int:
-    #     res = 0
-    #     if len(self._early_stack) > 0:
-    #         for id, e in enumerate(self._early_stack):
-    #             if is_scan_prod(e.production):
-    #                 assert id == len(self._early_stack) - 1
-    #                 if self._history[-1] == 2 + self.productions.index(e.production): # if the last action is NP -> *<w>
-    #                     res += 1
-    #             else:
-    #                 if id == len(self._early_stack) - 1:
-    #                     res += len(e.production.rhs) - e.next_open_nt_id
-    #                 else:
-    #                     if len(e.production.rhs) - e.next_open_nt_id - 1 > 0:
-    #                         res += len(e.production.rhs) - e.next_open_nt_id - 1
-    #         return res
-    #     else:
-    #         return 0
-
+# @property
+# def _num_empty_nt(self) -> int:
+#     res = 0
+#     if len(self._early_stack) > 0:
+#         for id, e in enumerate(self._early_stack):
+#             if is_scan_prod(e.production):
+#                 assert id == len(self._early_stack) - 1
+#                 if self._history[-1] == 2 + self.productions.index(e.production): # if the last action is NP -> *<w>
+#                     res += 1
+#             else:
+#                 if id == len(self._early_stack) - 1:
+#                     res += len(e.production.rhs) - e.next_open_nt_id
+#                 else:
+#                     if len(e.production.rhs) - e.next_open_nt_id - 1 > 0:
+#                         res += len(e.production.rhs) - e.next_open_nt_id - 1
+#         return res
+#     else:
+#         return 0
