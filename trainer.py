@@ -1,11 +1,10 @@
 import pprint
-
+from timeit import default_timer as timer
 import argparse
 from typing import List, NamedTuple, Optional, Sequence, Sized, Tuple, Union, cast
 import copy
 import pickle
 from nltk.stem.wordnet import WordNetLemmatizer
-
 import shutil
 import numpy as np
 import logging
@@ -244,24 +243,36 @@ class Trainer(object):
                             repeat=False)
         return dataset, iterator
 
-    def get_singletons(self):
-        self.cached_singleton_file = os.path.join(self.save_to, 'singletons.pkl')
-        if self.use_cache:
-            self.logger.info('Loading self.singleton from ' + self.cached_singleton_file)
-            self.singletons = torch.load(self.cached_singleton_file)
-        else:
-            self.logger.info('Dumping cached self.singleton into ' + self.cached_singleton_file)
-            torch.save(self.singletons, self.cached_singleton_file)
+    def get_singletons(self, examples, corpus):
+        # self.cached_singleton_file = os.path.join(CACHE_DIR, os.path.join(os.path.basename(corpus), '_singleton.pkl'))
+        # if self.use_cache:
+        #     self.logger.info('Loading self.singleton from ' + self.cached_singleton_file)
+        #     self.singletons = torch.load(self.cached_singleton_file)
+        # else:
+        #     self.logger.info('Dumping cached self.singleton into ' + self.cached_singleton_file)
+        #     torch.save(self.singletons, self.cached_singleton_file)
 
-    def process_corpora(self) -> None:
-        self.train_dataset, self.train_iterator = self.process_each_corpus(self.train_corpus, 'train', shuffle=True)
+        # add singleton into self.singleton
+        self.logger.info('Geting singleton from' + str(corpus))
+        for example in examples:
+            raw_token_lst = example.raws
+            unk_lst = example.words
+            pos_tag_lst = example.pos_tags
+            for id, w in enumerate(raw_token_lst):
+                if unk_lst[id].startswith('unk'):
+                    if unk_lst[id] == 'unk-num':  # doesn't replace unk-num with number
+                        continue
+                    # if not w.startswith('unk'):
+                    added_singleton = self.preprocess_token(w, pos_tag_lst[id])
+                    self.singletons.add(added_singleton)
+
+    def process_corpora(self):
+        self.train_dataset, self.train_iterator = self.process_each_corpus(self.train_corpus, 'train', shuffle=False)
         self.logger.info('Len of train = ' + str(len(self.train_iterator)))
-
         if self.dev_corpus:
             self.dev_dataset, self.dev_iterator = self.process_each_corpus(self.dev_corpus, 'dev', shuffle=False)
             self.logger.info('Len of dev = ' + str(len(self.dev_iterator)))
-
-        self.get_singletons()
+        self.get_singletons(self.train_dataset, self.train_corpus)
 
         if self.test_corpus:
             self.test_dataset, self.test_iterator = self.process_each_corpus(self.test_corpus, 'test', shuffle=False)
@@ -291,14 +302,13 @@ class Trainer(object):
         self.logger.info('Len singleton = ' + str(len(self.singletons)))
         extend_vocab(self.WORDS, self.singletons, using_vector=True)
 
-        #print vocab to file
+        # print vocab to file
         f_write = open(os.path.join(self.save_to, 'vocab.txt'), 'w')
         for w in self.WORDS.vocab.itos:
             f_write.write(w + '\n')
 
         cnt_zero = 0
         zero_words = []
-
         for cnt, each_vec in enumerate(self.WORDS.vocab.vectors):
             if each_vec.sum().item() == 0:
                 cnt_zero += 1
@@ -317,7 +327,6 @@ class Trainer(object):
 
         self.ACTIONS.build_vocab()
         assert self.ACTIONS.vocab.itos[2] == 'NP(TOP -> S)'
-        # self.RAWS.build_vocab(self.train_dataset)
 
         self.num_words = len(self.WORDS.vocab)
         self.num_pos = len(self.POS_TAGS.vocab)
@@ -325,8 +334,6 @@ class Trainer(object):
         self.num_actions = len(self.ACTIONS.vocab)
         self.logger.info('Found %d words, %d POS tags, %d nonterminals, %d actions',
                          self.num_words, self.num_pos, self.num_nt, self.num_actions)
-        # self.logger.info('Saving fields dict to%s', self.fields_dict_path)
-        # torch.save(dict(self.fields), self.fields_dict_path, pickle_module=dill)
 
     def build_model(self) -> None:
         self.logger.info('Building model')
@@ -385,24 +392,12 @@ class Trainer(object):
             # lower = f.readline().strip()
             unks_str = f.readline().strip()
             unk_lst = [self.preprocess_token(x.lower(), tag) for x, tag in zip(unks_str.split(), pos_tag_str.split())]
-            # raw_token_lst = [self.preprocess_token(x.lower(), tag) for x, tag in zip(raw_token_str.split(), pos_tag_str.split())]
-            # raw_token_lst = [self.preprocess_token(x.lower(), tag) for x, tag in zip(token_str.split(), pos_tag_str.split())]
             raw_token_lst = [x for x in raw_token_str.split()]
 
-            # replace <unk> in raw with specific unk type in unk_lst
-            for id, raw_token in enumerate(raw_token_lst):
-                if raw_token == '<unk>':
-                    raw_token_lst[id] = unk_lst[id]
-
-            # add singleton into self.singleton
-            if name == 'train' or name == 'dev':
-                for id, w in enumerate(raw_token_lst):
-                    if unk_lst[id].startswith('unk'):
-                        if unk_lst[id] == 'unk-num':  # doesn't replace unk-num with number
-                            continue
-                        if not w.startswith('unk'):
-                            added_singleton = self.preprocess_token(w, pos_tag_str.split()[id])
-                            self.singletons.add(added_singleton)
+            # # replace <unk> in raw with specific unk type in unk_lst
+            # for id, raw_token in enumerate(raw_token_lst):
+            #     if raw_token == '<unk>':
+            #         raw_token_lst[id] = unk_lst[id]
 
             # get action seqs
             actions = []
@@ -494,6 +489,7 @@ class Trainer(object):
         for epoch in range(self.max_epochs):
             start_time = timeit.default_timer()
             for cnt, instance in enumerate(self.train_iterator):
+                # start_instance = timer()
                 self.model.zero_grad()
                 # if instance.labels.item() == False: continue
 
@@ -518,7 +514,11 @@ class Trainer(object):
                                     cnt_change += 1
                                     # self.logger.info('Change from ' + cur_unk_word + ' into ' + singleton)
 
+                # print ('before forward =', timer() - start_instance)
+                # start = timer()
                 self.log_logits, self.pred_action_ids = self.model.forward(instance, unk_words, pos_tags, actions)
+                # print ('forward = ', timer() - start)
+                # after_forward = timer()
                 self.training_loss = self.losser(self.log_logits, instance.actions.view(-1))
                 assert not torch.isinf(self.training_loss)
                 assert not torch.isnan(self.training_loss)
@@ -531,6 +531,9 @@ class Trainer(object):
                 res = self.get_eval_metrics(instance, self.pred_action_ids)
                 epoch_meter.update(res)
                 interval_meter.update(res)
+                # print ('after forward =', timer() - after_forward)
+                # print ('instance =', timer() - start_instance)
+                # print ('')
 
                 # logging
                 if (cnt + 1) % self.log_interval == 0 or cnt == len(self.train_iterator) - 1:
@@ -543,7 +546,7 @@ class Trainer(object):
                             cnt + 1,
                             len(self.train_iterator),
                             interval_loss / self.log_interval,
-                            epoch_meter.f1,
+                            interval_meter.f1,
                             interval_meter.error_tree,
                             elapsed))
 
@@ -582,10 +585,16 @@ class Trainer(object):
         infer_meter = utils.ParsingMeter()
         self.model.eval()
         with torch.no_grad():
-            for instance in iterator:
-                self.pred_action_ids, _ = self.model.decode(instance)
+            for cnt, instance in enumerate(iterator):
+                try:
+                    self.pred_action_ids, pred_tree = self.model.decode(instance)
+                except:
+                    print('Decode error at', instance.raw_seq)
+                # print ('decode =', timer() - start)
                 metric = self.get_eval_metrics(instance, self.pred_action_ids)
                 infer_meter.update(metric)
+                # if (cnt + 1) % 100 == 0:
+                #     print ('Current', cnt + 1)
         return infer_meter
 
     def inference(self, iterator, type_corpus, step=1, tf_board=True):
@@ -608,12 +617,19 @@ class Trainer(object):
         self.logger.info('Loading model from ' + str(self.resume_file))
 
         if self.exclude_word_emb:
-            self.logger.info('Excluding word embedding from pretrained model')
+            self.logger.warning('Excluding word embedding from pretrained model')
             pretrained_dict = torch.load(self.resume_file)
-            model_dict = self.model.state_dict()
-            pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'word_embedding' not in k}
-            model_dict.update(pretrained_dict)
-            self.model.load_state_dict(model_dict)
+            # model_dict = self.model.state_dict()
+            # pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'word_embedding' not in k}
+            # model_dict.update(pretrained_dict)
+            # self.model.load_state_dict(model_dict)
+
+            # get part of word emb
+            cur_word_emb_size = self.model.state_dict()['word_embedding.weight'].size()[0]
+            pretrain_word_emb_size = pretrained_dict['word_embedding.weight'].size()[0]
+            if cur_word_emb_size < pretrain_word_emb_size:
+                pretrained_dict['word_embedding.weight'] = pretrained_dict['word_embedding.weight'][:cur_word_emb_size]
+            self.model.load_state_dict(pretrained_dict)
         else:
             self.model.load_state_dict(torch.load(self.resume_file))
         self.logger.info('Done loading.')
@@ -665,6 +681,10 @@ class Trainer(object):
 
         measure = scorer.Scorer()
         golden_seq = instance.raw_seq[0]
+        # print ('raws =', instance.raws[0])
+        # print ('converted_seq =', converted_seq)
+        # print ('golden_seq =', golden_seq)
+
         gold_tree = parser.create_from_bracket_string(golden_seq)
         converted_tree = parser.create_from_bracket_string(converted_seq)
         ret = measure.score_trees(gold_tree, converted_tree)
@@ -699,6 +719,7 @@ class Trainer(object):
         # self.inference(self.dev_iterator, type_corpus='dev', tf_board=True)
         self.training()
         self.inference(self.test_iterator, type_corpus='test', tf_board=True)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train RNNG network')
