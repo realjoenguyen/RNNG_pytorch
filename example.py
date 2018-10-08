@@ -19,5 +19,5 @@ def make_example_from_oracles(oracle: Oracle, fields: List[Tuple[str, Field]]):
     nonterms = [item for sublist in nonterms for item in sublist]
     return Example.fromlist(
         # [oracle.actions, nonterms, oracle.pos_tags, oracle.words, oracle.raws, oracle.check_unk], fields
-        [oracle.actions, nonterms, oracle.pos_tags, oracle.words, oracle.raws], fields
+        [oracle.raw_seq, oracle.actions, nonterms, oracle.pos_tags, oracle.words, oracle.raws], fields
     )
