@@ -244,27 +244,30 @@ class Trainer(object):
         return dataset, iterator
 
     def get_singletons(self, examples, corpus):
-        # self.cached_singleton_file = os.path.join(CACHE_DIR, os.path.join(os.path.basename(corpus), '_singleton.pkl'))
-        # if self.use_cache:
-        #     self.logger.info('Loading self.singleton from ' + self.cached_singleton_file)
-        #     self.singletons = torch.load(self.cached_singleton_file)
-        # else:
-        #     self.logger.info('Dumping cached self.singleton into ' + self.cached_singleton_file)
-        #     torch.save(self.singletons, self.cached_singleton_file)
+        self.cached_singleton_file = os.path.join(CACHE_DIR, os.path.basename(corpus) + '_singleton.pkl')
+        if os.path.exists(self.cached_singleton_file):
+            self.logger.info('Loading self.singleton from ' + self.cached_singleton_file)
+            self.singletons = torch.load(self.cached_singleton_file)
+        else:
+            # add singleton into self.singleton
+            self.logger.info('Geting singleton from' + str(corpus))
+            for example in examples:
+                raw_token_lst = example.raws
+                unk_lst = example.words
+                pos_tag_lst = example.pos_tags
+                for id, w in enumerate(raw_token_lst):
+                    if unk_lst[id].startswith('unk'):
+                        if unk_lst[id] == 'unk-num':  # doesn't replace unk-num with number
+                            continue
+                        # if not w.startswith('unk'):
+                        added_singleton = self.preprocess_token(w, pos_tag_lst[id])
+                        self.singletons.add(added_singleton)
 
-        # add singleton into self.singleton
-        self.logger.info('Geting singleton from' + str(corpus))
-        for example in examples:
-            raw_token_lst = example.raws
-            unk_lst = example.words
-            pos_tag_lst = example.pos_tags
-            for id, w in enumerate(raw_token_lst):
-                if unk_lst[id].startswith('unk'):
-                    if unk_lst[id] == 'unk-num':  # doesn't replace unk-num with number
-                        continue
-                    # if not w.startswith('unk'):
-                    added_singleton = self.preprocess_token(w, pos_tag_lst[id])
-                    self.singletons.add(added_singleton)
+            self.logger.info('Dumping cached self.singleton into ' + self.cached_singleton_file)
+            torch.save(self.singletons, self.cached_singleton_file)
+
+        assert len(self.singletons) > 0
+        self.logger.info('Len singleton = ' + str(len(self.singletons)))
 
     def process_corpora(self):
         self.train_dataset, self.train_iterator = self.process_each_corpus(self.train_corpus, 'train', shuffle=True)
@@ -298,8 +301,6 @@ class Trainer(object):
         pretrained_vec = vocab.Vectors(os.path.basename(self.pretrained_emb_path),
                                        os.path.dirname(self.pretrained_emb_path))
         self.WORDS.build_vocab(self.train_dataset, min_freq=self.min_freq, vectors=pretrained_vec)
-        assert len(self.singletons) > 0
-        self.logger.info('Len singleton = ' + str(len(self.singletons)))
         extend_vocab(self.WORDS, self.singletons, using_vector=True)
 
         # print vocab to file
@@ -354,9 +355,11 @@ class Trainer(object):
             words=self.WORDS,
             rule_emb=self.rule_emb,
         )
-        self.logger.info('Using rule embedding')
+
         self.model = DiscRNNG(*model_args, **model_kwargs)
+        # TODO: set device gpu 1
         if self.cuda:
+            # torch.cuda.set_device(1)
             self.model.cuda()
 
     def preprocess_token(self, token: str, pos_tag: str):
@@ -478,7 +481,12 @@ class Trainer(object):
         self.losser = torch.nn.NLLLoss(reduction='sum')
 
     def training(self):
+        if self.rule_emb:
+            self.logger.info('Using rule embedding')
+        else:
+            self.logger.info('Using rule composition')
         self.logger.info('Start training ...')
+
         self.model.train()
         if torch.cuda.is_available() and not self.cuda:
             self.logger.warning("WARNING: You have a CUDA device, so you should probably run with --cuda")
@@ -487,7 +495,7 @@ class Trainer(object):
         epoch_meter = utils.ParsingMeter()
         interval_meter = utils.ParsingMeter()
         total_step = 0
-        best_dev_f1 = 0
+        self.best_dev_f1 = 0
         interval_loss = 0
         for epoch in range(self.max_epochs):
             start_time = timeit.default_timer()
@@ -534,9 +542,6 @@ class Trainer(object):
                 res = self.get_eval_metrics(instance, self.pred_action_ids)
                 epoch_meter.update(res)
                 interval_meter.update(res)
-                # print ('after forward =', timer() - after_forward)
-                # print ('instance =', timer() - start_instance)
-                # print ('')
 
                 # logging
                 if (cnt + 1) % self.log_interval == 0 or cnt == len(self.train_iterator) - 1:
@@ -566,12 +571,12 @@ class Trainer(object):
             # self.logger.info('Change ' + str(cnt_change) + ' unk tokens into singleton tokens')
             cnt_change = 0
             if self.dev_corpus:
-                if best_dev_f1 == 0:
+                if self.best_dev_f1 == 0:
                     self.save_model(epoch + 1)
                 dev_meter = self.inference(self.dev_iterator, type_corpus='dev', step=epoch + 1, tf_board=True)
-                if dev_meter.f1 > best_dev_f1:
-                    best_dev_f1 = dev_meter.f1
-                    self.logger.info('Best F1: ' + str(best_dev_f1))
+                if dev_meter.f1 > self.best_dev_f1:
+                    self.best_dev_f1 = dev_meter.f1
+                    self.logger.info('Best F1: ' + str(self.best_dev_f1))
                     saved_files = glob.glob(os.path.join(self.saved_model_dir, '*'))
                     for file in saved_files:
                         os.remove(file)
@@ -604,6 +609,7 @@ class Trainer(object):
         self.logger.info('Testing on ' + type_corpus)
         infer_meter = self.get_info_infer(iterator)
         self.logger.info('F1: {}, Error tree {}'.format(infer_meter.f1, infer_meter.error_tree))
+        self.logger.info('Best F1: {}'.format(self.best_dev_f1))
         if tf_board:
             test_info = {type_corpus + '_F1': infer_meter.f1,
                          type_corpus + '_error_tree': infer_meter.error_tree}
@@ -632,21 +638,29 @@ class Trainer(object):
             pretrain_word_emb_size = pretrained_dict['word_embedding.weight'].size()[0]
             if cur_word_emb_size < pretrain_word_emb_size:
                 pretrained_dict['word_embedding.weight'] = pretrained_dict['word_embedding.weight'][:cur_word_emb_size]
-            self.model.load_state_dict(pretrained_dict)
+            # self.model.load_state_dict(pretrained_dict)
         else:
             pretrained_dict = torch.load(self.resume_file)
-            model_dict = self.model.state_dict()
-            pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
-            model_dict.update(pretrained_dict)
-            self.model.load_state_dict(model_dict)
 
-            # self.model.load_state_dict(torch.load(self.resume_file))
+        model_dict = self.model.state_dict()
+        pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+        model_dict.update(pretrained_dict)
+        self.model.load_state_dict(model_dict)
+
+        # self.model.load_state_dict(torch.load(self.resume_file))
         self.logger.info('Done loading.')
 
     def check_grad(self):
         self.model.train()
         instance = next(iter(self.train_iterator))
         self.model.zero_grad()
+        for id in instance.words.view(-1).data.tolist():
+            assert id < self.num_words and id >= 0
+        for id in instance.pos_tags.view(-1).data.tolist():
+            assert id < self.num_pos and id >= 0
+        for id in instance.actions.view(-1).data.tolist():
+            assert id < self.num_actions and id >= 0
+
         self.log_logits, self.pred_action_ids = self.model.forward(instance,
                                                                    instance.words.view(-1),
                                                                    instance.pos_tags.view(-1),
@@ -667,15 +681,22 @@ class Trainer(object):
                 if self.rule_emb:
                     if 'rule_fwd_composer' or 'rule_bwd_composer' or 'nt_embedding' in name:
                         continue
+                else:
+                    if 'rule_emb' in name or 'rule2encoder':
+                        continue
                 raise ValueError('There is no grad at', name)
 
     def check_zero_embedding(self):
-        for name in 'word pos nt action'.split():
+        self.logger.info('Checking zero emb')
+        str_check = 'word pos nt action'
+        if self.rule_emb: str_check += ' rule'
+        for name in str_check.split():
             embedding = getattr(self.model, '{}_embedding'.format(name))
-            # print (name, embedding)
-            for row in embedding.weight.data:
-                assert not row.equal(torch.zeros_like(row))
+            for id, row in enumerate(embedding.weight.data):
+                if row.equal(torch.zeros_like(row)):
+                    raise ValueError('Not zero:', name, id)
 
+        self.logger.info('Checking zero para')
         for name, para in self.model.named_parameters():
             if para.equal(torch.zeros_like(para)):
                 assert 'bias' in name or 'guard' in name or 'h0' in name or 'c0' in name
@@ -708,6 +729,7 @@ class Trainer(object):
         assert match_num == pred_num
 
     def unit_test(self):
+        self.logger.info('Unit test')
         self.check_zero_embedding()
         if self.resume_dir:
             self.check_load()

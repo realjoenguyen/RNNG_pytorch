@@ -33,7 +33,8 @@
 #     return ret
 from typing import List
 
-def action2treestr(actions : List[str], tokens: List[str], postags: List[str] = None) -> str:
+
+def action2treestr(actions: List[str], tokens: List[str], postags: List[str] = None) -> str:
     res = ''
     p = 0
     for action in actions:
@@ -45,11 +46,12 @@ def action2treestr(actions : List[str], tokens: List[str], postags: List[str] = 
             p += 1
         elif action == 'REDUCE':
             res += ') '
-        else: # NP (rule)
+        else:  # NP (rule)
             prod_split = action[3:-1].partition('->')
             lhs = prod_split[0].strip()
             res += '(' + lhs + ' '
     return res
+
 
 class ParsingMeter(object):
     def __init__(self):
@@ -85,19 +87,3 @@ class ParsingMeter(object):
         self.match_num += res[0]
         self.gold_num += res[1]
         self.pred_num += res[2]
-
-# class AverageMeter(object):
-#     def __init__(self):
-#         self.reset()
-#
-#     def reset(self):
-#         self.val = 0
-#         self.avg = 0
-#         self.sum = 0
-#         self.count = 0
-#
-#     def update(self, val, n = 1):
-#         self.val = val
-#         self.sum += val * n
-#         self.count += n
-#         self.avg = self.sum / self.count
