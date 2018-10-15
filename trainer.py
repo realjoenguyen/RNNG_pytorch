@@ -1,5 +1,4 @@
 import pprint
-from timeit import default_timer as timer
 import argparse
 from typing import List, NamedTuple, Optional, Sequence, Sized, Tuple, Union, cast
 import copy
@@ -8,7 +7,6 @@ from nltk.stem.wordnet import WordNetLemmatizer
 import shutil
 import numpy as np
 import logging
-import os
 import random
 import re
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -29,10 +27,13 @@ import glob
 import json
 from action_prod_field import ActionRuleField
 from production import get_productions_from_file, Production
+import os
+from cls import CyclicLR
 
 CACHE_DIR = './cache'
 from nltk.corpus import wordnet
-
+#TODO: change device
+os.environ["CUDA_VISIBLE_DEVICES"] = '1'
 
 def get_wordnet_pos(pos_tag: str):
     if pos_tag.startswith('J'):
@@ -83,7 +84,7 @@ class Trainer(object):
                  rnng_type='discriminative',
                  lower=True,
                  min_freq=1,
-                 lemma=True,
+                 lemma=False,
                  word_embedding_size=100,
                  pos_embedding_size=10,
                  nt_embedding_size=60,
@@ -108,9 +109,11 @@ class Trainer(object):
                  exclude_word_emb=False,
                  use_cache=False,
                  rule_emb=False,
+                 cyclic_lr=False,
                  cache_path="./cache"):
 
         self.id = id
+        self.cyclic_lr = cyclic_lr
         self.use_cache = use_cache
         self.patience = patience
         self.use_unk = use_unk
@@ -151,8 +154,9 @@ class Trainer(object):
         pprint.pprint(self.attributes_dict)
 
         self.singletons = set()
-        self.hper = 'id={};optimizer={};unk={};emb_type={};lemma={};lr={:.4f};word={};clip={}'.format(
+        self.hper = 'id={};rule_emb={};optimizer={};unk={};emb_type={};lemma={};lr={:.4f};word={};clip={}'.format(
             self.id,
+            self.rule_emb,
             self.optimizer_type,
             self.use_unk,
             # self.new_corpus,
@@ -245,6 +249,8 @@ class Trainer(object):
 
     def get_singletons(self, examples, corpus):
         self.cached_singleton_file = os.path.join(CACHE_DIR, os.path.basename(corpus) + '_singleton.pkl')
+        if not self.lemma:
+            self.cached_singleton_file += '_notlemma'
         if os.path.exists(self.cached_singleton_file):
             self.logger.info('Loading self.singleton from ' + self.cached_singleton_file)
             self.singletons = torch.load(self.cached_singleton_file)
@@ -357,9 +363,7 @@ class Trainer(object):
         )
 
         self.model = DiscRNNG(*model_args, **model_kwargs)
-        # TODO: set device gpu 1
         if self.cuda:
-            # torch.cuda.set_device(1)
             self.model.cuda()
 
     def preprocess_token(self, token: str, pos_tag: str):
@@ -421,6 +425,8 @@ class Trainer(object):
 
     def make_dataset(self, corpus, name):
         corpus_file_name = os.path.basename(corpus)
+        if not self.lemma:
+            corpus_file_name += '_notlemma'
         cached_corpus = os.path.join(CACHE_DIR, corpus_file_name + '.pkl')
         if self.use_cache:
             self.logger.info('Loading cached corpus from ' + cached_corpus)
@@ -474,10 +480,15 @@ class Trainer(object):
             self.optimizer = optim.SGD(self.model.parameters(), lr=self.learning_rate)
         self.logger.info('Using ' + self.optimizer_type + ' as optimizer, lr = ' + str(self.learning_rate))
 
-        self.scheduler = ReduceLROnPlateau(self.optimizer,
-                                           mode='min', factor=0.75,
-                                           patience=self.patience,
-                                           verbose=True, threshold=0.001)
+        if self.cyclic_lr:
+            self.logger.info('Using cyclic learning rate')
+            self.scheduler = CyclicLR(self.optimizer, base_lr=0.001, max_lr=0.1, step_size=8000, mode='triangular')
+        else:
+            self.scheduler = ReduceLROnPlateau(self.optimizer,
+                                               mode='min', factor=0.75,
+                                               patience=self.patience,
+                                               verbose=True, threshold=0.001)
+
         self.losser = torch.nn.NLLLoss(reduction='sum')
 
     def training(self):
@@ -502,7 +513,8 @@ class Trainer(object):
             for cnt, instance in enumerate(self.train_iterator):
                 # start_instance = timer()
                 self.model.zero_grad()
-                # if instance.labels.item() == False: continue
+                if self.cyclic_lr:
+                     self.scheduler.batch_step()
 
                 # [value, batch_size] -> [value]
                 # only have 1 batch
@@ -527,9 +539,15 @@ class Trainer(object):
 
                 # print ('before forward =', timer() - start_instance)
                 # start = timer()
+                word_condi = not unk_words.equal(torch.zeros_like(unk_words))
+                pos_tag_condi = not pos_tags.equal(torch.zeros_like(pos_tags))
+                action_condi = not actions.equal(torch.zeros_like(actions))
+                assert word_condi or pos_tag_condi or action_condi
+
                 self.log_logits, self.pred_action_ids = self.model.forward(instance, unk_words, pos_tags, actions)
                 # print ('forward = ', timer() - start)
                 # after_forward = timer()
+                # print (self.log_logits.size(), instance.actions.view(-1).size())
                 self.training_loss = self.losser(self.log_logits, instance.actions.view(-1))
                 assert not torch.isinf(self.training_loss)
                 assert not torch.isnan(self.training_loss)
@@ -537,7 +555,6 @@ class Trainer(object):
                 self.training_loss.backward()
                 if self.clip > 0:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip)
-
                 self.optimizer.step()
                 res = self.get_eval_metrics(instance, self.pred_action_ids)
                 epoch_meter.update(res)
@@ -583,7 +600,8 @@ class Trainer(object):
                         self.logger.warning('Removed' + str(file))
                     self.save_model(epoch + 1)
                 self.model.train()
-                self.scheduler.step(dev_meter.f1)
+                if not self.cyclic_lr:
+                    self.scheduler.step(dev_meter.f1)
 
             epoch_meter.reset()
         self.save_model('final')
@@ -625,27 +643,29 @@ class Trainer(object):
         self.resume_file = self.resume_file_lst[0]
         self.logger.info('Loading model from ' + str(self.resume_file))
 
+        # TODO: notice this
+
         if self.exclude_word_emb:
             self.logger.warning('Excluding word embedding from pretrained model')
             pretrained_dict = torch.load(self.resume_file)
-            # model_dict = self.model.state_dict()
-            # pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'word_embedding' not in k}
-            # model_dict.update(pretrained_dict)
-            # self.model.load_state_dict(model_dict)
+            model_dict = self.model.state_dict()
+            pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'word_embedding' not in k}
+            model_dict.update(pretrained_dict)
+            self.model.load_state_dict(model_dict)
 
-            # get part of word emb
-            cur_word_emb_size = self.model.state_dict()['word_embedding.weight'].size()[0]
-            pretrain_word_emb_size = pretrained_dict['word_embedding.weight'].size()[0]
-            if cur_word_emb_size < pretrain_word_emb_size:
-                pretrained_dict['word_embedding.weight'] = pretrained_dict['word_embedding.weight'][:cur_word_emb_size]
-            # self.model.load_state_dict(pretrained_dict)
+            # # get part of word emb
+            # self.logger.info('Get part of pretrained word emb')
+            # cur_word_emb_size = self.model.state_dict()['word_embedding.weight'].size()[0]
+            # pretrain_word_emb_size = pretrained_dict['word_embedding.weight'].size()[0]
+            # if cur_word_emb_size < pretrain_word_emb_size:
+            #     pretrained_dict['word_embedding.weight'] = pretrained_dict['word_embedding.weight'][:cur_word_emb_size]
+            # # self.model.load_state_dict(pretrained_dict)
         else:
             pretrained_dict = torch.load(self.resume_file)
-
-        model_dict = self.model.state_dict()
-        pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
-        model_dict.update(pretrained_dict)
-        self.model.load_state_dict(model_dict)
+            model_dict = self.model.state_dict()
+            pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+            model_dict.update(pretrained_dict)
+            self.model.load_state_dict(model_dict)
 
         # self.model.load_state_dict(torch.load(self.resume_file))
         self.logger.info('Done loading.')
@@ -780,6 +800,7 @@ def parse_args():
     parser.add_argument('--rule_emb', action='store_true')
     parser.add_argument('--optimizer', type=str, default='adam')
     parser.add_argument('--id', type=int, required=True)
+    parser.add_argument('--cyclic_lr', action='store_true')
     args = parser.parse_args()
     return args
 

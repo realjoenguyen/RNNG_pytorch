@@ -470,7 +470,6 @@ class DiscRNNG(nn.Module):
             self._buffer.append(word_id)
             if word_id not in self._word_emb:
                  print (word_id, len(self._word_emb))
-
             assert word_id in self._word_emb
             self.buffer_encoder.push(self._word_emb[word_id])
 
