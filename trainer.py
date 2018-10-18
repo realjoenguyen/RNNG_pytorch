@@ -29,11 +29,14 @@ from action_prod_field import ActionRuleField
 from production import get_productions_from_file, Production
 import os
 from cls import CyclicLR
+from timeit import default_timer as timer
 
 CACHE_DIR = './cache'
 from nltk.corpus import wordnet
-#TODO: change device
-os.environ["CUDA_VISIBLE_DEVICES"] = '1'
+
+
+# #TODO: change device
+# os.environ["CUDA_VISIBLE_DEVICES"] = '1'
 
 def get_wordnet_pos(pos_tag: str):
     if pos_tag.startswith('J'):
@@ -482,7 +485,7 @@ class Trainer(object):
 
         if self.cyclic_lr:
             self.logger.info('Using cyclic learning rate')
-            self.scheduler = CyclicLR(self.optimizer, base_lr=0.001, max_lr=0.1, step_size=8000, mode='triangular')
+            self.scheduler = CyclicLR(self.optimizer, base_lr=0.001, max_lr=0.1, step_size=16000, mode='triangular')
         else:
             self.scheduler = ReduceLROnPlateau(self.optimizer,
                                                mode='min', factor=0.75,
@@ -514,7 +517,7 @@ class Trainer(object):
                 # start_instance = timer()
                 self.model.zero_grad()
                 if self.cyclic_lr:
-                     self.scheduler.batch_step()
+                    self.scheduler.batch_step()
 
                 # [value, batch_size] -> [value]
                 # only have 1 batch
@@ -649,17 +652,22 @@ class Trainer(object):
             self.logger.warning('Excluding word embedding from pretrained model')
             pretrained_dict = torch.load(self.resume_file)
             model_dict = self.model.state_dict()
-            pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'word_embedding' not in k}
+            # pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'word_embedding' not in k}
+            # model_dict.update(pretrained_dict)
+            # self.model.load_state_dict(model_dict)
+
+            # get part of word emb
+            self.logger.info('Get part of pretrained word emb')
+            cur_word_emb_size = self.model.state_dict()['word_embedding.weight'].size()[0]
+            pretrain_word_emb_size = pretrained_dict['word_embedding.weight'].size()[0]
+            if cur_word_emb_size < pretrain_word_emb_size:
+                pretrained_dict['word_embedding.weight'] = pretrained_dict['word_embedding.weight'][:cur_word_emb_size]
+            else:
+                model_dict['word_embedding.weight'][:pretrain_word_emb_size] = pretrained_dict['word_embedding.weight']
+                pretrained_dict['word_embedding.weight'] = model_dict['word_embedding.weight']
+
             model_dict.update(pretrained_dict)
             self.model.load_state_dict(model_dict)
-
-            # # get part of word emb
-            # self.logger.info('Get part of pretrained word emb')
-            # cur_word_emb_size = self.model.state_dict()['word_embedding.weight'].size()[0]
-            # pretrain_word_emb_size = pretrained_dict['word_embedding.weight'].size()[0]
-            # if cur_word_emb_size < pretrain_word_emb_size:
-            #     pretrained_dict['word_embedding.weight'] = pretrained_dict['word_embedding.weight'][:cur_word_emb_size]
-            # # self.model.load_state_dict(pretrained_dict)
         else:
             pretrained_dict = torch.load(self.resume_file)
             model_dict = self.model.state_dict()
