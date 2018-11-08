@@ -1,3 +1,4 @@
+from nltk.tree import Tree
 import pprint
 import argparse
 from typing import List, NamedTuple, Optional, Sequence, Sized, Tuple, Union, cast
@@ -17,7 +18,8 @@ import torch
 import torch.optim as optim
 import timeit
 from example import make_example_from_oracles
-from models import DiscRNNG
+# from models import DiscRNNG
+from models_c import DiscRNNG
 from oracle import DiscOracle
 from torchtext.data import Iterator
 from torchtext import vocab
@@ -34,9 +36,8 @@ from timeit import default_timer as timer
 CACHE_DIR = './cache'
 from nltk.corpus import wordnet
 
-
-# #TODO: change device
-# os.environ["CUDA_VISIBLE_DEVICES"] = '1'
+#TODO: change device
+# os.environ["CUDA_VISIBLE_DEVICES"] = '0'
 
 def get_wordnet_pos(pos_tag: str):
     if pos_tag.startswith('J'):
@@ -53,6 +54,7 @@ def get_wordnet_pos(pos_tag: str):
 
 def load_pretrained_model(type, pretrained_file):
     cache_file = os.path.join('./cache/', type + '_vocab.pkl')
+    print (glob.glob('./*'))
     if os.path.exists(cache_file):
         print('loading cached vocab from', cache_file)
         res = pickle.load(open(cache_file, 'rb'))
@@ -602,35 +604,52 @@ class Trainer(object):
                         os.remove(file)
                         self.logger.warning('Removed' + str(file))
                     self.save_model(epoch + 1)
+
                 self.model.train()
                 if not self.cyclic_lr:
                     self.scheduler.step(dev_meter.f1)
 
             epoch_meter.reset()
-        self.save_model('final')
+        self.logger.info('Best F1: {}'.format(self.best_dev_f1))
         self.logger.info('Finish training')
 
-    def get_info_infer(self, iterator):
-        infer_meter = utils.ParsingMeter()
+    # def get_info_infer(self, iterator):
+    #     return infer_meter
+
+    def inference(self, iterator, type_corpus, step=1, tf_board=True):
+        self.logger.info('Testing on ' + type_corpus)
+        result_file = "./post_processing/pred_dev_seq.txt"
+        true_file = "./post_processing/dev_seqs.txt"
+        f_write = open(result_file, 'w')
+        f2_write = open(true_file, 'w')
+
         self.model.eval()
+        infer_meter = utils.ParsingMeter()
         with torch.no_grad():
             for cnt, instance in enumerate(iterator):
                 try:
                     self.pred_action_ids, pred_tree = self.model.decode(instance)
                 except:
                     print('Decode error at', instance.raw_seq)
-                # print ('decode =', timer() - start)
                 metric = self.get_eval_metrics(instance, self.pred_action_ids)
                 infer_meter.update(metric)
-                # if (cnt + 1) % 100 == 0:
-                #     print ('Current', cnt + 1)
-        return infer_meter
+                action_str_lst = [self.ACTIONS.vocab.itos[e] for e in self.pred_action_ids]
+                pos_tag_lst = [self.POS_TAGS.vocab.itos[e] for e in instance.pos_tags.view(-1)]
+                pred_seq = utils.action2treestr(action_str_lst, instance.raws[0], pos_tag_lst)
+                f_write.write(pred_seq + "\n")
+                f2_write.write(instance.raw_seq[0] + "\n")
 
-    def inference(self, iterator, type_corpus, step=1, tf_board=True):
-        self.logger.info('Testing on ' + type_corpus)
-        infer_meter = self.get_info_infer(iterator)
+                # if metric != 1 and (metric[0] != metric[1] or metric[1] != metric[2]):
+                #     f_write.write(instance.raw_seq[0] + "\n")
+                #     f_write.write(str(metric) + "\n")
+                #     Tree.fromstring(instance.raw_seq[0]).pretty_print(stream=f_write)
+                #     Tree.fromstring(pred_seq).pretty_print(stream=f_write)
+                #     f_write.write('\n')
+
+                # if (cnt + 1) % 100 == 0:
+                #     print ('Current', cnt + 1, infer_meter.f1)
         self.logger.info('F1: {}, Error tree {}'.format(infer_meter.f1, infer_meter.error_tree))
-        self.logger.info('Best F1: {}'.format(self.best_dev_f1))
+
         if tf_board:
             test_info = {type_corpus + '_F1': infer_meter.f1,
                          type_corpus + '_error_tree': infer_meter.error_tree}
@@ -779,9 +798,9 @@ class Trainer(object):
         if self.resume_dir:
             self.load_model(self.resume_dir)
         self.unit_test()
-        # self.inference(self.dev_iterator, type_corpus='dev', tf_board=True)
-        self.training()
-        self.inference(self.test_iterator, type_corpus='test', tf_board=True)
+        self.inference(self.dev_iterator, type_corpus='dev', tf_board=True)
+        # self.training()
+        # self.inference(self.test_iterator, type_corpus='test', tf_board=True)
 
 
 def parse_args():
