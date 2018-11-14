@@ -36,7 +36,8 @@ from timeit import default_timer as timer
 CACHE_DIR = './cache'
 from nltk.corpus import wordnet
 
-#TODO: change device
+
+# TODO: change device
 # os.environ["CUDA_VISIBLE_DEVICES"] = '0'
 
 def get_wordnet_pos(pos_tag: str):
@@ -54,7 +55,7 @@ def get_wordnet_pos(pos_tag: str):
 
 def load_pretrained_model(type, pretrained_file):
     cache_file = os.path.join('./cache/', type + '_vocab.pkl')
-    print (glob.glob('./*'))
+    print(glob.glob('./*'))
     if os.path.exists(cache_file):
         print('loading cached vocab from', cache_file)
         res = pickle.load(open(cache_file, 'rb'))
@@ -93,12 +94,14 @@ class Trainer(object):
                  word_embedding_size=100,
                  pos_embedding_size=10,
                  nt_embedding_size=60,
-                 action_embedding_size=36,
+                 action_embedding_size=100,
                  rule_embedding_size=100,
+                 char_embedding_size=50,
+                 char_lstm_size=100,
                  input_size=128,
                  hidden_size=128,
                  num_layers=2,
-                 dropout=0.2,
+                 dropout=0.4,
                  learning_rate=0.01,
                  max_epochs=1000,
                  seed=25122017,
@@ -117,6 +120,7 @@ class Trainer(object):
                  cyclic_lr=False,
                  cache_path="./cache"):
 
+        self.char_embedding_size = char_embedding_size
         self.id = id
         self.cyclic_lr = cyclic_lr
         self.use_cache = use_cache
@@ -151,6 +155,7 @@ class Trainer(object):
         self.log_interval = log_interval
         self.batch_size = batch_size
         self.rule_emb = rule_emb
+        self.char_lstm_size = char_lstm_size
         if self.emb_type == 'glove':
             self.pretrained_emb_path = os.path.join(emb_path, 'glove.6B.' + str(self.word_embedding_size) + 'd.txt')
         else:
@@ -187,7 +192,6 @@ class Trainer(object):
 
     def prepare_output_dir(self) -> None:
         # logger
-        # self.logger.info('Preparing output directory in %s', self.save_to)
         print('Preparing output directory in', self.save_to)
         self.save_to = os.path.join(self.save_to, self.hper)
         if os.path.exists(self.save_to):
@@ -230,11 +234,11 @@ class Trainer(object):
         self.WORDS = Field(pad_token=None, lower=self.lower)
         self.POS_TAGS = Field(pad_token=None)
         self.NONTERMS = Field(pad_token=None)
-        # self.ACTIONS = ActionField(self.NONTERMS)
         self.ACTIONS = ActionRuleField(self.NONTERMS, self.productions)
-        # self.RAWS = Field(lower=self.lower, pad_token=None)
         self.RAWS = RawField()
         self.SEQ = RawField()
+        # self.ACTIONS = ActionField(self.NONTERMS)
+        # self.RAWS = Field(lower=self.lower, pad_token=None)
         self.fields = [
             ('raw_seq', self.SEQ),
             ('actions', self.ACTIONS), ('nonterms', self.NONTERMS),
@@ -356,6 +360,8 @@ class Trainer(object):
             nt_embedding_size=self.nt_embedding_size,
             action_embedding_size=self.action_embedding_size,
             rule_embedding_size=self.rule_embedding_size,
+            char_embedding_size=self.char_embedding_size,
+            char_lstm_size=self.char_lstm_size,
             input_size=self.input_size,
             hidden_size=self.hidden_size,
             num_layers=self.num_layers,
@@ -409,11 +415,6 @@ class Trainer(object):
             unk_lst = [self.preprocess_token(x.lower(), tag) for x, tag in zip(unks_str.split(), pos_tag_str.split())]
             raw_token_lst = [x for x in raw_token_str.split()]
 
-            # # replace <unk> in raw with specific unk type in unk_lst
-            # for id, raw_token in enumerate(raw_token_lst):
-            #     if raw_token == '<unk>':
-            #         raw_token_lst[id] = unk_lst[id]
-
             # get action seqs
             actions = []
             while True:
@@ -432,6 +433,7 @@ class Trainer(object):
         corpus_file_name = os.path.basename(corpus)
         if not self.lemma:
             corpus_file_name += '_notlemma'
+
         cached_corpus = os.path.join(CACHE_DIR, corpus_file_name + '.pkl')
         if self.use_cache:
             self.logger.info('Loading cached corpus from ' + cached_corpus)
@@ -501,7 +503,6 @@ class Trainer(object):
             self.logger.info('Using rule embedding')
         else:
             self.logger.info('Using rule composition')
-        self.logger.info('Start training ...')
 
         self.model.train()
         if torch.cuda.is_available() and not self.cuda:
@@ -526,6 +527,7 @@ class Trainer(object):
                 unk_words = instance.words.view(-1)
                 pos_tags = instance.pos_tags.view(-1)
                 actions = instance.actions.view(-1)
+                raws = instance.raws[0]
 
                 # replace unk
                 origin_unk_words = self.id2original(self.WORDS, instance.words)
@@ -542,17 +544,12 @@ class Trainer(object):
                                     cnt_change += 1
                                     # self.logger.info('Change from ' + cur_unk_word + ' into ' + singleton)
 
-                # print ('before forward =', timer() - start_instance)
-                # start = timer()
                 word_condi = not unk_words.equal(torch.zeros_like(unk_words))
                 pos_tag_condi = not pos_tags.equal(torch.zeros_like(pos_tags))
                 action_condi = not actions.equal(torch.zeros_like(actions))
                 assert word_condi or pos_tag_condi or action_condi
 
-                self.log_logits, self.pred_action_ids = self.model.forward(instance, unk_words, pos_tags, actions)
-                # print ('forward = ', timer() - start)
-                # after_forward = timer()
-                # print (self.log_logits.size(), instance.actions.view(-1).size())
+                self.log_logits, self.pred_action_ids = self.model.forward(unk_words, pos_tags, raws, actions)
                 self.training_loss = self.losser(self.log_logits, instance.actions.view(-1))
                 assert not torch.isinf(self.training_loss)
                 assert not torch.isnan(self.training_loss)
@@ -595,6 +592,7 @@ class Trainer(object):
             if self.dev_corpus:
                 if self.best_dev_f1 == 0:
                     self.save_model(epoch + 1)
+
                 dev_meter = self.inference(self.dev_iterator, type_corpus='dev', step=epoch + 1, tf_board=True)
                 if dev_meter.f1 > self.best_dev_f1:
                     self.best_dev_f1 = dev_meter.f1
@@ -613,13 +611,10 @@ class Trainer(object):
         self.logger.info('Best F1: {}'.format(self.best_dev_f1))
         self.logger.info('Finish training')
 
-    # def get_info_infer(self, iterator):
-    #     return infer_meter
-
     def inference(self, iterator, type_corpus, step=1, tf_board=True):
         self.logger.info('Testing on ' + type_corpus)
-        result_file = "./post_processing/pred_dev_seq.txt"
-        true_file = "./post_processing/dev_seqs.txt"
+        result_file = "./post_processing/pred_test_seq.txt"
+        true_file = "./post_processing/test_seqs.txt"
         f_write = open(result_file, 'w')
         f2_write = open(true_file, 'w')
 
@@ -631,6 +626,7 @@ class Trainer(object):
                     self.pred_action_ids, pred_tree = self.model.decode(instance)
                 except:
                     print('Decode error at', instance.raw_seq)
+
                 metric = self.get_eval_metrics(instance, self.pred_action_ids)
                 infer_meter.update(metric)
                 action_str_lst = [self.ACTIONS.vocab.itos[e] for e in self.pred_action_ids]
@@ -659,38 +655,35 @@ class Trainer(object):
 
     def load_model(self, resume_dir):
         resume_dir = re.sub('\'', '', resume_dir)
-        self.logger.info('Get file from dir ' + str(resume_dir))
         self.resume_file_lst = glob.glob(os.path.join(resume_dir, '*'))
         assert len(self.resume_file_lst) == 1
         self.resume_file = self.resume_file_lst[0]
         self.logger.info('Loading model from ' + str(self.resume_file))
 
-        # TODO: notice this
-
         if self.exclude_word_emb:
             self.logger.warning('Excluding word embedding from pretrained model')
             pretrained_dict = torch.load(self.resume_file)
             model_dict = self.model.state_dict()
-            # pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'word_embedding' not in k}
-            # model_dict.update(pretrained_dict)
-            # self.model.load_state_dict(model_dict)
-
-            # get part of word emb
-            self.logger.info('Get part of pretrained word emb')
-            cur_word_emb_size = self.model.state_dict()['word_embedding.weight'].size()[0]
-            pretrain_word_emb_size = pretrained_dict['word_embedding.weight'].size()[0]
-            if cur_word_emb_size < pretrain_word_emb_size:
-                pretrained_dict['word_embedding.weight'] = pretrained_dict['word_embedding.weight'][:cur_word_emb_size]
-            else:
-                model_dict['word_embedding.weight'][:pretrain_word_emb_size] = pretrained_dict['word_embedding.weight']
-                pretrained_dict['word_embedding.weight'] = model_dict['word_embedding.weight']
-
+            pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'word_embedding' not in k}
             model_dict.update(pretrained_dict)
             self.model.load_state_dict(model_dict)
+
+            # # get part of word emb
+            # self.logger.info('Get part of pretrained word emb')
+            # cur_word_emb_size = self.model.state_dict()['word_embedding.weight'].size()[0]
+            # pretrain_word_emb_size = pretrained_dict['word_embedding.weight'].size()[0]
+            # if cur_word_emb_size < pretrain_word_emb_size:
+            #     pretrained_dict['word_embedding.weight'] = pretrained_dict['word_embedding.weight'][:cur_word_emb_size]
+            # else:
+            #     model_dict['word_embedding.weight'][:pretrain_word_emb_size] = pretrained_dict['word_embedding.weight']
+            #     pretrained_dict['word_embedding.weight'] = model_dict['word_embedding.weight']
+            #
+            # model_dict.update(pretrained_dict)
+            # self.model.load_state_dict(model_dict)
         else:
             pretrained_dict = torch.load(self.resume_file)
             model_dict = self.model.state_dict()
-            pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+            pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and v.size() == model_dict[k].size()}
             model_dict.update(pretrained_dict)
             self.model.load_state_dict(model_dict)
 
@@ -708,10 +701,11 @@ class Trainer(object):
         for id in instance.actions.view(-1).data.tolist():
             assert id < self.num_actions and id >= 0
 
-        self.log_logits, self.pred_action_ids = self.model.forward(instance,
-                                                                   instance.words.view(-1),
-                                                                   instance.pos_tags.view(-1),
-                                                                   instance.actions.view(-1))
+        self.log_logits, self.pred_action_ids = self.model.forward(
+            instance.words.view(-1),
+            instance.pos_tags.view(-1),
+            instance.raws[0],
+            instance.actions.view(-1))
 
         self.training_loss = self.losser(self.log_logits, instance.actions.view(-1))
         assert self.training_loss.item() != 0
@@ -762,9 +756,6 @@ class Trainer(object):
 
         measure = scorer.Scorer()
         golden_seq = instance.raw_seq[0]
-        # print ('raws =', instance.raws[0])
-        # print ('converted_seq =', converted_seq)
-        # print ('golden_seq =', golden_seq)
 
         gold_tree = parser.create_from_bracket_string(golden_seq)
         converted_tree = parser.create_from_bracket_string(converted_seq)
@@ -775,6 +766,14 @@ class Trainer(object):
         assert match_num == gold_num
         assert match_num == pred_num
 
+    def check_inference(self):
+        self.model.eval()
+        infer_meter = utils.ParsingMeter()
+        with torch.no_grad():
+            for cnt, instance in enumerate(self.dev_iterator):
+                self.pred_action_ids, pred_tree = self.model.decode(instance)
+                break
+
     def unit_test(self):
         self.logger.info('Unit test')
         self.check_zero_embedding()
@@ -782,6 +781,7 @@ class Trainer(object):
             self.check_load()
         self.check_grad()
         self.check_action2treeseq()
+        self.check_inference()
         self.logger.info('Finish all unit tests')
 
     def run(self):
@@ -794,12 +794,12 @@ class Trainer(object):
         self.build_vocab()
         self.build_model()
         self.build_optimizer()
-        self.old_paras = copy.deepcopy(list(self.model.parameters()))
         if self.resume_dir:
+            self.old_paras = copy.deepcopy(list(self.model.parameters()))
             self.load_model(self.resume_dir)
         self.unit_test()
-        self.inference(self.dev_iterator, type_corpus='dev', tf_board=True)
-        # self.training()
+        self.training()
+        # self.inference(self.dev_iterator, type_corpus='dev', tf_board=True)
         # self.inference(self.test_iterator, type_corpus='test', tf_board=True)
 
 

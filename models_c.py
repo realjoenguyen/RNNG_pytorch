@@ -1,6 +1,8 @@
 # coding=utf-8
+import string
 from timeit import default_timer as timer
 import nltk
+from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 from typing import List, NamedTuple, Optional, Sequence, Sized, Tuple, Union, cast
 from typing import Dict  # noqa
 import torchtext
@@ -13,6 +15,8 @@ import torch.nn.init as init
 from StackLSTM import StackLSTM
 from self_typing import WordId, NTId, ActionId
 from production import Production
+import numpy as np
+
 
 # StackElement = NamedTuple('StackElement', [('subtree', Union[WordId, Tree]),
 #                                            ('production', Union[Production, str]),
@@ -25,7 +29,7 @@ class StackElement(object):
                  subtree: Union[WordId, Tree],
                  production: Union[Production, str],
                  is_open_np: bool,
-                 emb: Variable):
+                 emb: torch.Tensor):
         self.subtree = subtree
         self.production = production
         self.is_open_np = is_open_np
@@ -36,6 +40,7 @@ class StackElement(object):
         yield self.production
         yield self.is_open_np
         yield self.emb
+
 
 # EarlyElement = NamedTuple('EarlyElement', [('production', Production),
 #                                            ('next_open_nt_id', int),
@@ -49,7 +54,8 @@ class StackElement(object):
 
 from early_stack import EarlyElement, EarlyStack, getProductionLst
 
-def log_softmax(inputs: Variable, restrictions: Optional[torch.LongTensor] = None) -> Variable:
+
+def log_softmax(inputs: torch.Tensor, restrictions: Optional[torch.LongTensor] = None) -> Variable:
     if restrictions is None:
         return F.log_softmax(inputs)
 
@@ -79,6 +85,8 @@ class DiscRNNG(nn.Module):
                  nt_embedding_size,
                  action_embedding_size,
                  rule_embedding_size,
+                 char_embedding_size,
+                 char_lstm_size,
                  input_size,
                  hidden_size,
                  num_layers,
@@ -106,6 +114,8 @@ class DiscRNNG(nn.Module):
         self.productions = productions  # type: List[Production]
         self.NONTERMS = nonterms
         self.WORDS = words
+        self.char_embedding_size = char_embedding_size
+        self.char_lstm_size = char_lstm_size
 
         # Parser states
         self._stack = []  # type: List[StackElement]
@@ -126,6 +136,9 @@ class DiscRNNG(nn.Module):
         self.nt_embedding = nn.Embedding(self.num_nt, self.nt_embedding_size)
         self.action_embedding = nn.Embedding(self.num_actions, self.action_embedding_size)
         self.rule_embedding = nn.Embedding(self.num_rules, self.rule_embedding_size)
+
+        self.char_vocab = ['<pad>'] + list(string.printable) + ['<SOS>', '<EOS>']
+        self.char_embedding = nn.Embedding(self.num_chars, self.char_embedding_size)
 
         # Parser state encoders
         self.stack_encoder = StackLSTM(self.input_size,
@@ -156,6 +169,12 @@ class DiscRNNG(nn.Module):
                                     num_layers=self.num_layers,
                                     dropout=self.dropout)
 
+        self.char_composer = nn.LSTM(self.char_embedding_size,
+                                     self.char_lstm_size // 2,
+                                     batch_first=True,
+                                     num_layers=1,
+                                     bidirectional=True)
+
         # Rule compositon
         self.rule_fwd_composer = nn.LSTM(self.input_size,
                                          self.input_size,
@@ -168,7 +187,7 @@ class DiscRNNG(nn.Module):
 
         # Transformations
         self.word2encoder = nn.Sequential(
-            nn.Linear(self.word_embedding_size + self.pos_embedding_size, self.hidden_size),
+            nn.Linear(self.word_embedding_size + self.pos_embedding_size + self.char_lstm_size, self.hidden_size),
             nn.ReLU(),
             # nn.Tanh(),
         )
@@ -208,6 +227,10 @@ class DiscRNNG(nn.Module):
         self.reset_parameters()
 
     @property
+    def num_chars(self) -> int:
+        return len(self.char_vocab)
+
+    @property
     def num_actions(self) -> int:
         return len(self.productions) + 2
 
@@ -215,41 +238,27 @@ class DiscRNNG(nn.Module):
     def num_rules(self) -> int:
         return len(self.productions)
 
-    # @property
-    # def _num_empty_nt(self) -> int:
-    #     res = 0
-    #     if len(self._early_stack) > 0:
-    #         for id, e in enumerate(self._early_stack):
-    #             if is_scan_prod(e.production):
-    #                 assert id == len(self._early_stack) - 1
-    #                 if self._history[-1] == 2 + self.productions.index(e.production): # if the last action is NP -> *<w>
-    #                     res += 1
-    #             else:
-    #                 if id == len(self._early_stack) - 1:
-    #                     res += len(e.production.rhs) - e.next_open_nt_id
-    #                 else:
-    #                     if len(e.production.rhs) - e.next_open_nt_id - 1 > 0:
-    #                         res += len(e.production.rhs) - e.next_open_nt_id - 1
-    #         return res
-    #     else:
-    #         return 0
-
-    # def next_early_open_nt(self) -> str:
-    #     # assert len(self._early_stack) > 0
-    #     top = self._early_stack[-1]  # type: EarlyElement
-    #     # assert top.next_open_nt_id < len(top.production.data)
-    #     return top.production.rhs[top.next_open_nt_id]
-
     @property
     def finished(self) -> bool:
         return len(self._stack) == 1 and not self._stack[0].is_open_np \
                and len(self._buffer) == 0
 
+    def random_embedding(self, embedding: torch.nn.Embedding):
+        vocab_size = embedding.num_embeddings
+        embedding_dim = embedding.embedding_dim
+        pretrain_emb = np.empty([vocab_size, embedding_dim])
+        scale = np.sqrt(3.0 / embedding_dim)
+        for index in range(vocab_size):
+            pretrain_emb[index, :] = np.random.uniform(-scale, scale, [1, embedding_dim])
+        return torch.from_numpy(pretrain_emb)
+
     def reset_parameters(self) -> None:
         # Embeddings
-        for name in 'pos nt action rule'.split():
+        for name in 'pos nt action rule char'.split():
             embedding = getattr(self, '{}_embedding'.format(name))
-            embedding.reset_parameters()
+            embedding.weight.data.copy_(self.random_embedding(embedding))
+            # embedding.reset_parameters()
+            # setattr(self, '{}_embedding'.format(name), nn.Parameter(self.random_embedding(embedding)))
 
         # Encoders
         for name in 'stack buffer history'.split():
@@ -257,7 +266,7 @@ class DiscRNNG(nn.Module):
             encoder.reset_parameters()
 
         # Compositions
-        for name in 'fwd bwd rule_fwd rule_bwd'.split():
+        for name in 'fwd bwd rule_fwd rule_bwd char'.split():
             lstm = getattr(self, '{}_composer'.format(name))
             for pname, pval in lstm.named_parameters():
                 if pname.startswith('weight'):
@@ -289,20 +298,22 @@ class DiscRNNG(nn.Module):
             init.constant_(guard, 0.)
 
     def forward(self,
-                instance: torchtext.data.Batch,
+                # instance: torchtext.data.Batch,
                 words: torch.Tensor,
                 pos_tags: torch.Tensor,
+                raws: list,
                 actions: torch.Tensor):
 
-        self.instance = instance
+        # self.instance = instance
         assert words.dim() == 1
         assert words.size() == pos_tags.size()
         assert actions.dim() == 1
 
-        self._start(words, pos_tags, actions=actions)
+        self._start(words, pos_tags, raws, actions=actions)
         # llh = 0.
         llh = []
         predicted_actions = []
+
         for action in actions:
             assert len(self.stack_encoder) == len(self._stack) + 1
             log_probs = self._compute_action_log_probs()
@@ -345,8 +356,9 @@ class DiscRNNG(nn.Module):
         self.instance = instance
         words = instance.words.view(-1)
         pos_tags = instance.pos_tags.view(-1)
+        raws = instance.raws[0]
 
-        self._start(words, pos_tags)
+        self._start(words, pos_tags, raws)
         while not self.finished:
             log_probs = self._compute_action_log_probs()
             assert all(torch.isnan(log_probs)) is False
@@ -383,12 +395,15 @@ class DiscRNNG(nn.Module):
         return list(self._history), self._stack[0].subtree
 
     def _start(self,
-               words: Variable,
-               pos_tags: Variable,
+               words: torch.Tensor,
+               pos_tags: torch.Tensor,
+               raws: list,
                actions: Optional[Variable] = None) -> None:
 
         assert words.dim() == 1
+        assert pos_tags.dim() == 1
         assert words.size() == pos_tags.size()
+        assert words.size()[0] == len(raws)
         if actions is not None:
             assert actions.dim() == 1
 
@@ -412,24 +427,35 @@ class DiscRNNG(nn.Module):
         self.history_encoder.push(self.history_guard)
 
         # Initialize input buffer and its LSTM encoder
-        self._prepare_embeddings(words, pos_tags, actions=actions)
+        self._prepare_embeddings(words, pos_tags, raws, actions=actions)
         for word_id in reversed(words.data.tolist()):
             self._buffer.append(word_id)
             if word_id not in self._word_emb:
-                 print (word_id, len(self._word_emb))
+                print(word_id, len(self._word_emb))
             assert word_id in self._word_emb
             self.buffer_encoder.push(self._word_emb[word_id])
 
+        # pre-cal lstm for rule composition
+        # (# of rule, D)
+        # self.rule_composition = self.make_rule_composition(actions)
+
+    # def make_rule_composition(self, actions : torch.Tensor):
+    #     rule_actions = [action for action in actions if actions > 1]
+
     def _prepare_embeddings(self,
-                            words: Variable,
-                            pos_tags: Variable,
+                            words: torch.Tensor,
+                            pos_tags: torch.Tensor,
+                            raws: list,
                             actions: Optional[Variable] = None) -> None:
         # words: (seq_length,)
         # pos_tags: (seq_length,)
+        # raws : (seq_length, )
         # actions: (action_seq_length,)
 
         assert words.dim() == 1
+        assert pos_tags.dim() == 1
         assert words.size() == pos_tags.size()
+        assert words.size()[0] == len(raws)
         if actions is not None:
             assert actions.dim() == 1
 
@@ -440,6 +466,8 @@ class DiscRNNG(nn.Module):
         with torch.no_grad():
             nonterms = Variable(self._new(range(self.num_nt))).long()
 
+        # (L, D)
+        char_embs = self.make_char_embs(raws)
         word_embs = self.word_embedding(
             words.view(1, -1)).view(-1, self.word_embedding_size)
         pos_embs = self.pos_embedding(
@@ -449,13 +477,32 @@ class DiscRNNG(nn.Module):
         action_embs = self.action_embedding(
             actions.view(1, -1)).view(-1, self.action_embedding_size)
 
-        final_word_embs = self.word2encoder(torch.cat([word_embs, pos_embs], dim=1))
+        final_word_embs = self.word2encoder(torch.cat([word_embs, pos_embs, char_embs], dim=1))
         final_nt_embs = self.nt2encoder(nt_embs)
         final_action_embs = self.action2encoder(action_embs)
 
         self._word_emb = dict(zip(words.data.tolist(), final_word_embs))
         self._nt_emb = dict(zip(nonterms.data.tolist(), final_nt_embs))
         self._action_emb = dict(zip(actions.data.tolist(), final_action_embs))
+
+    def make_char_embs(self, raws: list) -> torch.Tensor:
+        # return (B, D)
+        # (B, L)
+        B = len(raws)  # number of words
+        vectorized_chars = [torch.LongTensor([self.char_vocab.index(ch) for ch in word]) for word in raws]
+        chars_lengths = torch.LongTensor(list(map(len, vectorized_chars))).cuda()
+
+        chars_lengths, perm_idx = chars_lengths.sort(0, descending=True)
+        chars_tensor = pad_sequence(vectorized_chars, batch_first=True).cuda()
+        chars_tensor = chars_tensor[perm_idx]
+
+        # (L, B, D)
+        char_embs = self.char_embedding(chars_tensor)
+        packed_emb = pack_padded_sequence(char_embs, chars_lengths, batch_first=True)
+
+        # (2, B, D)
+        _, (output_hidden, _) = self.char_composer(packed_emb)
+        return output_hidden.transpose(1, 0).contiguous().view(B, -1)  # (2, B, D) -> (B, 2, D) -> (B, D)
 
     def _compute_action_log_probs(self) -> Variable:
         assert self.stack_encoder.top is not None
@@ -560,10 +607,10 @@ class DiscRNNG(nn.Module):
 
     def _push_prod(self, prod_id: int):
         # assert self._check_push_pred_np(prod_id)
-        cur_prod = self.productions[prod_id] #type: Production
+        cur_prod = self.productions[prod_id]  # type: Production
         lhs_nt_id = self.NONTERMS.vocab.stoi[cur_prod.lhs]
 
-        if self.rule_emb: # use rule embedding
+        if self.rule_emb:  # use rule embedding
             lookup_tensor = torch.tensor([prod_id])
             rule_embedding = self.rule_embedding(lookup_tensor.cuda()).view(-1, self.rule_embedding_size)
             composed_emb = self.rule2encoder(rule_embedding).view(self.hidden_size)
@@ -665,7 +712,7 @@ class DiscRNNG(nn.Module):
 
         self._early_stack.reduce()
 
-    def _compose(self, open_nt_emb: Variable, children_embs: Sequence[torch.Tensor], rule=False) -> Variable:
+    def _compose(self, open_nt_emb: torch.Tensor, children_embs: Sequence[torch.Tensor], rule=False) -> Variable:
         assert open_nt_emb.size() == (self.input_size,)
         assert all(x.size() == (self.input_size,) for x in children_embs)
 
@@ -740,3 +787,29 @@ class DiscRNNG(nn.Module):
 #         return res
 #     else:
 #         return 0
+
+
+# @property
+# def _num_empty_nt(self) -> int:
+#     res = 0
+#     if len(self._early_stack) > 0:
+#         for id, e in enumerate(self._early_stack):
+#             if is_scan_prod(e.production):
+#                 assert id == len(self._early_stack) - 1
+#                 if self._history[-1] == 2 + self.productions.index(e.production): # if the last action is NP -> *<w>
+#                     res += 1
+#             else:
+#                 if id == len(self._early_stack) - 1:
+#                     res += len(e.production.rhs) - e.next_open_nt_id
+#                 else:
+#                     if len(e.production.rhs) - e.next_open_nt_id - 1 > 0:
+#                         res += len(e.production.rhs) - e.next_open_nt_id - 1
+#         return res
+#     else:
+#         return 0
+
+# def next_early_open_nt(self) -> str:
+#     # assert len(self._early_stack) > 0
+#     top = self._early_stack[-1]  # type: EarlyElement
+#     # assert top.next_open_nt_id < len(top.production.data)
+#     return top.production.rhs[top.next_open_nt_id]
